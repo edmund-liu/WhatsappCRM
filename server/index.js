@@ -1,0 +1,29 @@
+import express from 'express';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import apiRouter from './routes/api.js';
+import webhookRouter from './routes/webhook.js';
+import { startScheduler } from './services/broadcaster.js';
+import './db.js';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const app = express();
+
+app.use(express.json({ limit: '1mb' }));
+app.use('/api', apiRouter);
+app.use('/webhook', webhookRouter);
+app.use(express.static(path.join(__dirname, '..', 'public')));
+app.get('/{*splat}', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));
+
+app.use((err, req, res, next) => {
+  console.error(err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+startScheduler();
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`WhatsApp CRM running on http://localhost:${PORT}`);
+  console.log('Default login: admin@example.com / admin123');
+});

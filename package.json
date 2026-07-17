@@ -1,0 +1,25 @@
+{
+  "name": "whatsapp-crm",
+  "version": "1.0.0",
+  "description": "Zoko-style WhatsApp Cloud CRM: team inbox, broadcasts, round-robin assignment, AI auto-reply",
+  "main": "server/index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "http://local_proxy@127.0.0.1:41729/git/edmund-liu/WhatsappCRM"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "better-sqlite3": "^12.11.1",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3"
+  }
+}
