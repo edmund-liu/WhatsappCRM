@@ -3,7 +3,7 @@
 // GET  /webhook/whatsapp  -> subscription verification handshake
 // POST /webhook/whatsapp  -> inbound messages + delivery status updates
 import { Router } from 'express';
-import { getSetting } from '../db.js';
+import db, { getSetting } from '../db.js';
 import { handleInboundMessage } from '../services/inbound.js';
 import { applyStatusUpdate } from '../services/whatsapp.js';
 
@@ -26,6 +26,15 @@ router.post('/whatsapp', (req, res) => {
     for (const entry of req.body?.entry || []) {
       for (const change of entry.changes || []) {
         const value = change.value || {};
+
+        // Meta approved/rejected/paused a template -> sync status locally.
+        if (change.field === 'message_template_status_update') {
+          if (value.message_template_name && value.event) {
+            db.prepare('UPDATE templates SET status = ? WHERE name = ?')
+              .run(value.event, value.message_template_name);
+          }
+          continue;
+        }
         const contactNames = {};
         for (const c of value.contacts || []) contactNames[c.wa_id] = c.profile?.name;
 
@@ -46,7 +55,10 @@ router.post('/whatsapp', (req, res) => {
         }
 
         for (const status of value.statuses || []) {
-          applyStatusUpdate(status.id, status.status);
+          const error = status.errors?.[0]
+            ? `${status.errors[0].title || ''} ${status.errors[0].error_data?.details || ''}`.trim()
+            : null;
+          applyStatusUpdate(status.id, status.status, error);
         }
       }
     }

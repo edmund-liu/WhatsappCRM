@@ -545,10 +545,15 @@
   // ---------- Templates ----------
   async function renderTemplates($main) {
     const templates = await api('/templates');
+    const isAdmin = state.user.role === 'admin';
+    const tplBadge = (s) => ({ APPROVED: 'green', PENDING: 'amber', REJECTED: 'red', PAUSED: 'amber' }[s] || 'gray');
     $main.innerHTML = `<div class="page">
       <div class="page-header">
-        <div><h2>Message templates</h2><div class="sub">Use {{name}} for the contact's name and {{1}}, {{2}}… for campaign variables</div></div>
-        <button class="btn" id="new-tpl">+ New template</button>
+        <div><h2>Message templates</h2><div class="sub">Use {{name}} for the contact's name and {{1}}, {{2}}… for campaign variables. Templates sync with your Meta WhatsApp Business Account.</div></div>
+        <div style="display:flex;gap:8px">
+          ${isAdmin ? '<button class="btn ghost" id="sync-tpl">⟳ Sync from Meta</button>' : ''}
+          <button class="btn" id="new-tpl">+ New template</button>
+        </div>
       </div>
       <div class="card">
         <table class="table">
@@ -559,13 +564,33 @@
               <td><span class="badge ${t.category === 'MARKETING' ? 'purple' : 'blue'}">${t.category}</span></td>
               <td>${esc(t.language)}</td>
               <td style="max-width:380px">${esc(t.body)}</td>
-              <td><span class="badge green">${esc(t.status)}</span></td>
-              <td style="text-align:right">${state.user.role === 'admin' ? `<button class="btn small danger" data-del="${t.id}">Delete</button>` : ''}</td>
+              <td><span class="badge ${tplBadge(t.status)}">${esc(t.status)}</span>${t.meta_id ? '<br/><span class="muted" style="font-size:11px">synced to Meta</span>' : ''}</td>
+              <td style="text-align:right">${isAdmin ? `
+                ${!t.meta_id ? `<button class="btn small ghost" data-submit="${t.id}">Submit to Meta</button>` : ''}
+                <button class="btn small danger" data-del="${t.id}">Delete</button>` : ''}</td>
             </tr>`).join('') || '<tr><td colspan="6" class="muted">No templates yet</td></tr>'}
           </tbody>
         </table>
       </div>
     </div>`;
+
+    const syncBtn = document.getElementById('sync-tpl');
+    if (syncBtn) syncBtn.addEventListener('click', async () => {
+      syncBtn.disabled = true;
+      try {
+        const { count } = await api('/templates/sync', { method: 'POST' });
+        toast(`Synced ${count} template(s) from Meta`);
+        renderRoute();
+      } catch (err) { toast(err.message, true); syncBtn.disabled = false; }
+    });
+    $main.querySelectorAll('[data-submit]').forEach((b) => b.addEventListener('click', async () => {
+      b.disabled = true;
+      try {
+        const { status } = await api(`/templates/${b.dataset.submit}/submit`, { method: 'POST' });
+        toast(`Submitted to Meta — status: ${status}`);
+        renderRoute();
+      } catch (err) { toast(err.message, true); b.disabled = false; }
+    }));
 
     document.getElementById('new-tpl').addEventListener('click', () => {
       const m = modal(`
@@ -800,6 +825,7 @@
       <div class="card">
         <h3 style="margin-bottom:12px">WhatsApp Cloud API (live mode)</h3>
         <label class="field">Phone Number ID <input class="input" id="st-phoneid" value="${esc(s.wa_phone_number_id)}" placeholder="e.g. 123456789012345" /></label>
+        <label class="field">WhatsApp Business Account (WABA) ID — needed for template sync <input class="input" id="st-wabaid" value="${esc(s.wa_waba_id)}" placeholder="e.g. 987654321098765" /></label>
         <label class="field">Access token ${s.wa_access_token_set ? '<span class="badge green">set</span>' : '<span class="badge gray">not set</span>'}
           <input class="input" id="st-token" type="password" placeholder="Paste a new token to replace" /></label>
         <label class="field">Webhook verify token <input class="input" id="st-verify" value="${esc(s.wa_verify_token)}" placeholder="Any secret string; also enter it in Meta's webhook config" /></label>
@@ -817,6 +843,7 @@
         await api('/settings', { method: 'PUT', body: {
           sandbox_mode: document.getElementById('st-sandbox').checked,
           wa_phone_number_id: document.getElementById('st-phoneid').value.trim(),
+          wa_waba_id: document.getElementById('st-wabaid').value.trim(),
           wa_access_token: document.getElementById('st-token').value.trim() || undefined,
           wa_verify_token: document.getElementById('st-verify').value.trim(),
           anthropic_api_key: document.getElementById('st-anthropic').value.trim() || undefined,

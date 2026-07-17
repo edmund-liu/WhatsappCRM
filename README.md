@@ -22,8 +22,14 @@ assignment, staff sign-in, and Claude-powered AI agents that auto-reply and hand
   responder is used, so the flow is fully demoable offline.
 - **Contacts & tags** — contact book with tags (used as broadcast audiences), custom
   attributes, opt-out flag.
-- **Templates** — reusable message templates with `{{name}}` personalization and `{{1}}`,
-  `{{2}}`… variables, categorized MARKETING / UTILITY / AUTHENTICATION like Meta's.
+- **Templates with Meta sync** — reusable message templates with `{{name}}` personalization
+  and `{{1}}`, `{{2}}`… variables, categorized MARKETING / UTILITY / AUTHENTICATION.
+  Templates sync both ways with your WhatsApp Business Account: pull the approved library
+  from Meta (**⟳ Sync from Meta**), submit local templates for approval (**Submit to
+  Meta** — `{{name}}` is converted to Meta's positional placeholders automatically), and
+  approval/rejection webhooks update local status in real time.
+- **Read-receipt sync** — when a teammate opens a conversation, the read state is synced
+  back to Meta so the customer sees blue ticks on their phone.
 - **Analytics** — live counters (open chats, inbound/outbound/AI replies in 24h), 14-day
   message volume chart, open chats per teammate.
 - **WhatsApp Cloud API integration** — real Meta Graph API sending + webhook receiver
@@ -55,12 +61,13 @@ the delivery stats fill in live.
 
 1. Create a Meta app with the WhatsApp product and get a **Phone Number ID** and permanent
    **access token**.
-2. In **Settings** (admin): uncheck *Sandbox mode*, paste the Phone Number ID, access token,
-   and choose a webhook verify token.
+2. In **Settings** (admin): uncheck *Sandbox mode*, paste the Phone Number ID, WhatsApp
+   Business Account (WABA) ID, access token, and choose a webhook verify token.
 3. In Meta's app dashboard, set the webhook callback URL to
    `https://your-domain/webhook/whatsapp` with the same verify token, subscribed to
-   `messages`.
-4. Create your templates in Meta's Business Manager (names must match the templates here).
+   `messages` and `message_template_status_update`.
+4. On the Templates page, click **⟳ Sync from Meta** to import your approved template
+   library, or **Submit to Meta** to send locally created templates for approval.
 
 ## AI configuration
 

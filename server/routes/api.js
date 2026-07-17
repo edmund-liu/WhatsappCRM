@@ -1,9 +1,9 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
-import db, { getSetting, setSetting } from '../db.js';
+import db, { getSetting, setSetting, computeParamMap } from '../db.js';
 import { signToken, requireAuth, requireAdmin } from '../auth.js';
 import { emit, sseHandler } from '../services/events.js';
-import { sendText, isSandbox } from '../services/whatsapp.js';
+import { sendText, isSandbox, markConversationRead, pullTemplatesFromMeta, pushTemplateToMeta } from '../services/whatsapp.js';
 import { assignConversation, addSystemNote } from '../services/assignment.js';
 import { startBroadcast, broadcastStats, audienceForBroadcast } from '../services/broadcaster.js';
 import { handleInboundMessage } from '../services/inbound.js';
@@ -144,7 +144,12 @@ router.get('/conversations/:id/messages', (req, res) => {
     LEFT JOIN ai_agents a ON a.id = m.ai_agent_id
     WHERE m.conversation_id = ? ORDER BY m.id
   `).all(req.params.id);
-  db.prepare('UPDATE conversations SET unread_count = 0 WHERE id = ?').run(req.params.id);
+  const conv = db.prepare('SELECT unread_count FROM conversations WHERE id = ?').get(req.params.id);
+  if (conv?.unread_count) {
+    db.prepare('UPDATE conversations SET unread_count = 0 WHERE id = ?').run(req.params.id);
+    // Sync the read state back to Meta so the customer sees blue ticks.
+    markConversationRead(Number(req.params.id)).catch((err) => console.error('Read-receipt sync failed:', err.message));
+  }
   res.json(rows);
 });
 
@@ -216,11 +221,34 @@ router.post('/templates', (req, res) => {
   const { name, language, category, body } = req.body || {};
   if (!name || !body) return res.status(400).json({ error: 'name and body are required' });
   try {
-    const info = db.prepare('INSERT INTO templates (name, language, category, body) VALUES (?, ?, ?, ?)')
-      .run(String(name).toLowerCase().replace(/\s+/g, '_'), language || 'en', category || 'MARKETING', body);
+    const info = db.prepare('INSERT INTO templates (name, language, category, body, param_map) VALUES (?, ?, ?, ?, ?)')
+      .run(String(name).toLowerCase().replace(/\s+/g, '_'), language || 'en', category || 'MARKETING', body,
+        JSON.stringify(computeParamMap(body)));
     res.json(db.prepare('SELECT * FROM templates WHERE id = ?').get(info.lastInsertRowid));
   } catch {
     res.status(400).json({ error: 'A template with that name already exists' });
+  }
+});
+
+// Pull the template library from Meta's Business Management API.
+router.post('/templates/sync', requireAdmin, async (req, res) => {
+  try {
+    const count = await pullTemplatesFromMeta();
+    res.json({ ok: true, count });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Submit a local template to Meta for approval.
+router.post('/templates/:id/submit', requireAdmin, async (req, res) => {
+  const template = db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id);
+  if (!template) return res.status(404).json({ error: 'Template not found' });
+  try {
+    const out = await pushTemplateToMeta(template);
+    res.json({ ok: true, status: out.status || 'PENDING' });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
   }
 });
 
@@ -313,6 +341,7 @@ router.get('/settings', requireAdmin, (req, res) => {
   res.json({
     sandbox_mode: getSetting('sandbox_mode', '1') === '1',
     wa_phone_number_id: getSetting('wa_phone_number_id', ''),
+    wa_waba_id: getSetting('wa_waba_id', ''),
     wa_access_token_set: Boolean(getSetting('wa_access_token')),
     wa_verify_token: getSetting('wa_verify_token', ''),
     anthropic_api_key_set: Boolean(getSetting('anthropic_api_key') || process.env.ANTHROPIC_API_KEY),
@@ -320,9 +349,10 @@ router.get('/settings', requireAdmin, (req, res) => {
 });
 
 router.put('/settings', requireAdmin, (req, res) => {
-  const { sandbox_mode, wa_phone_number_id, wa_access_token, wa_verify_token, anthropic_api_key } = req.body || {};
+  const { sandbox_mode, wa_phone_number_id, wa_waba_id, wa_access_token, wa_verify_token, anthropic_api_key } = req.body || {};
   if (sandbox_mode !== undefined) setSetting('sandbox_mode', sandbox_mode ? '1' : '0');
   if (wa_phone_number_id !== undefined) setSetting('wa_phone_number_id', wa_phone_number_id);
+  if (wa_waba_id !== undefined) setSetting('wa_waba_id', wa_waba_id);
   if (wa_access_token) setSetting('wa_access_token', wa_access_token);
   if (wa_verify_token !== undefined) setSetting('wa_verify_token', wa_verify_token);
   if (anthropic_api_key) setSetting('anthropic_api_key', anthropic_api_key);

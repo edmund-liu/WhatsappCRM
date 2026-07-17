@@ -6,7 +6,7 @@
 // the webhook status pipeline (real or sandbox).
 import db from '../db.js';
 import { emit } from './events.js';
-import { sendTemplate, renderTemplate } from './whatsapp.js';
+import { sendTemplate, renderTemplate, buildTemplateParams } from './whatsapp.js';
 
 const SEND_INTERVAL_MS = 150; // ~6-7 msgs/sec, well under Cloud API limits
 const running = new Set();
@@ -53,11 +53,14 @@ async function runBroadcast(broadcastId) {
     const current = db.prepare('SELECT status FROM broadcasts WHERE id = ?').get(broadcastId);
     if (!current || current.status === 'cancelled') return;
     try {
-      const params = variables.map((v) => renderTemplate(v, contact));
+      // Positional params for Meta (via param_map); local rendering keeps
+      // {{name}}/{{n}} semantics for the conversation-thread copy.
+      const params = buildTemplateParams(template, contact, variables);
       const waMessageId = await sendTemplate(contact.wa_id, template, params);
+      const renderedVars = variables.map((v) => renderTemplate(v, contact));
       db.prepare("UPDATE broadcast_recipients SET status = 'sent', wa_message_id = ?, sent_at = datetime('now') WHERE id = ?")
         .run(waMessageId, contact.recipient_id);
-      recordBroadcastMessage(broadcastId, contact, renderTemplate(template.body, contact, params), waMessageId);
+      recordBroadcastMessage(broadcastId, contact, renderTemplate(template.body, contact, renderedVars), waMessageId);
     } catch (err) {
       db.prepare("UPDATE broadcast_recipients SET status = 'failed', error = ? WHERE id = ?")
         .run(String(err.message).slice(0, 300), contact.recipient_id);

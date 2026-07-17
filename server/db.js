@@ -120,6 +120,25 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 `);
 
+// ---- Migrations for databases created before template<->Meta sync ----
+const templateCols = db.prepare('PRAGMA table_info(templates)').all().map((c) => c.name);
+if (!templateCols.includes('param_map')) db.exec("ALTER TABLE templates ADD COLUMN param_map TEXT NOT NULL DEFAULT '[]'");
+if (!templateCols.includes('meta_id')) db.exec('ALTER TABLE templates ADD COLUMN meta_id TEXT');
+
+// Ordered list of placeholder tokens in a template body, e.g.
+// "Hi {{name}}, order {{1}} ships {{2}}" -> ["name","1","2"]. Meta templates
+// only allow positional {{1}}..{{n}} params, so this map records what each
+// position means when sending through the Cloud API.
+export function computeParamMap(body) {
+  return [...String(body).matchAll(/\{\{(name|\d+)\}\}/g)].map((m) => m[1]);
+}
+
+// Keep param_map in sync with bodies (covers seeds and older rows).
+for (const t of db.prepare('SELECT id, body, param_map FROM templates').all()) {
+  const map = JSON.stringify(computeParamMap(t.body));
+  if (map !== t.param_map) db.prepare('UPDATE templates SET param_map = ? WHERE id = ?').run(map, t.id);
+}
+
 export function getSetting(key, fallback = null) {
   const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
   return row ? row.value : fallback;
