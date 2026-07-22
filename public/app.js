@@ -106,13 +106,12 @@
   }
 
   async function refreshCurrentView() {
-    if (userIsTyping()) return; // don't re-render under the user's cursor
     if (state.route === 'inbox') {
-      await loadConversations();
-      if (state.activeConvId) await loadMessages(state.activeConvId, false).catch(() => {});
-      renderRoute();
+      // Granular DOM patching — never rebuilds the composer/action bar unless
+      // their data changed, so typing and the action bar stay stable.
+      await updateInbox().catch(() => {});
     } else if (['broadcasts', 'contacts', 'analytics'].includes(state.route)) {
-      renderRoute();
+      if (!userIsTyping()) renderRoute();
     }
   }
 
@@ -134,12 +133,9 @@
     es.onerror = () => {
       if (++sseFailures >= 3) { es.close(); es = null; startPolling(); }
     };
-    const refreshInbox = async (e) => {
-      if (state.route !== 'inbox' || userIsTyping()) return;
-      const data = JSON.parse(e.data || '{}');
-      await loadConversations();
-      if (data.conversation_id === state.activeConvId) await loadMessages(state.activeConvId, false);
-      renderRoute();
+    const refreshInbox = async () => {
+      if (state.route !== 'inbox') return;
+      await updateInbox().catch(() => {});
     };
     es.addEventListener('message_created', refreshInbox);
     es.addEventListener('conversation_updated', refreshInbox);
@@ -314,9 +310,50 @@
     return { open: '<span class="badge green">open</span>', pending: '<span class="badge amber">pending</span>', resolved: '<span class="badge gray">resolved</span>' }[s] || '';
   }
 
+  function convListHtml() {
+    return state.conversations.map((c) => `
+      <button class="conv-item ${c.id === state.activeConvId ? 'active' : ''}" data-conv="${c.id}">
+        <div class="top">
+          <span class="who">${esc(c.contact_name || '+' + c.wa_id)}</span>
+          <span class="when">${fmtTime(c.last_message_at)}</span>
+        </div>
+        <div class="preview">${esc(c.last_message_preview || '')}</div>
+        <div class="meta">
+          ${statusBadge(c.status)}
+          ${c.required_skill ? `<span class="badge amber">🏷 ${esc(c.required_skill)}</span>` : ''}
+          ${c.ai_enabled ? `<span class="badge purple">🤖 ${esc(c.ai_agent_name || 'AI')}</span>` : ''}
+          ${c.assigned_name ? `<span class="badge blue">${esc(c.assigned_name)}</span>` : (!c.ai_enabled ? '<span class="badge gray">unassigned</span>' : '')}
+          ${c.unread_count ? `<span class="unread-dot">${c.unread_count}</span>` : ''}
+        </div>
+      </button>`).join('') || '<div style="padding:20px" class="muted">No conversations yet. Use the simulator to create one!</div>';
+  }
+
+  function wireConvList($main) {
+    $main.querySelectorAll('[data-conv]').forEach((b) => b.addEventListener('click', async () => {
+      state.activeConvId = Number(b.dataset.conv);
+      await loadMessages(state.activeConvId);
+      renderRoute();
+    }));
+  }
+
+  // Snapshots of what's on screen so background refreshes only touch the DOM
+  // when data actually changed (prevents flicker and scroll jumps).
+  function takeSnapshots() {
+    state._convJson = JSON.stringify(state.conversations);
+    state._msgJson = JSON.stringify(state.messages);
+    state._metaJson = state.activeConv ? JSON.stringify([
+      state.activeConv.status, state.activeConv.assigned_user_id, state.activeConv.ai_enabled,
+      state.activeConv.ai_agent_id, state.activeConv.required_skill,
+    ]) : '';
+  }
+
   async function renderInbox($main) {
+    // Cache the team list so the action bar's assignment dropdown renders
+    // synchronously (no async fill-in flicker). Refreshed on each full render.
+    try { state.users = await api('/users'); } catch { state.users = state.users || []; }
     await loadConversations();
     if (state.activeConvId && !state.activeConv) await loadMessages(state.activeConvId).catch(() => { state.activeConvId = null; });
+    takeSnapshots();
 
     const filters = [['all', 'All'], ['mine', 'Mine'], ['unassigned', 'Unassigned'], ['ai', '🤖 AI']];
     $main.innerHTML = `
@@ -325,25 +362,14 @@
           <div class="filters">
             ${filters.map(([f, l]) => `<button class="chip ${state.convFilter === f ? 'active' : ''}" data-filter="${f}">${l}</button>`).join('')}
           </div>
-          <div class="conv-scroll">
-            ${state.conversations.map((c) => `
-              <button class="conv-item ${c.id === state.activeConvId ? 'active' : ''}" data-conv="${c.id}">
-                <div class="top">
-                  <span class="who">${esc(c.contact_name || '+' + c.wa_id)}</span>
-                  <span class="when">${fmtTime(c.last_message_at)}</span>
-                </div>
-                <div class="preview">${esc(c.last_message_preview || '')}</div>
-                <div class="meta">
-                  ${statusBadge(c.status)}
-                  ${c.required_skill ? `<span class="badge amber">🏷 ${esc(c.required_skill)}</span>` : ''}
-                  ${c.ai_enabled ? `<span class="badge purple">🤖 ${esc(c.ai_agent_name || 'AI')}</span>` : ''}
-                  ${c.assigned_name ? `<span class="badge blue">${esc(c.assigned_name)}</span>` : (!c.ai_enabled ? '<span class="badge gray">unassigned</span>' : '')}
-                  ${c.unread_count ? `<span class="unread-dot">${c.unread_count}</span>` : ''}
-                </div>
-              </button>`).join('') || '<div style="padding:20px" class="muted">No conversations yet. Use the simulator to create one!</div>'}
-          </div>
+          <div class="conv-scroll">${convListHtml()}</div>
         </div>
-        ${state.activeConv ? renderThread() : `
+        ${state.activeConv ? `
+          <div class="thread">
+            ${threadHeaderHtml()}
+            <div class="thread-msgs">${messagesHtml()}</div>
+            ${composerHtml()}
+          </div>` : `
           <div class="thread"><div class="empty-thread">
             <div class="big">💬</div>
             <div><b>Select a conversation</b></div>
@@ -355,20 +381,62 @@
     $main.querySelectorAll('[data-filter]').forEach((b) => b.addEventListener('click', async () => {
       state.convFilter = b.dataset.filter; await loadConversations(); renderRoute();
     }));
-    $main.querySelectorAll('[data-conv]').forEach((b) => b.addEventListener('click', async () => {
-      state.activeConvId = Number(b.dataset.conv);
-      await loadMessages(state.activeConvId);
-      renderRoute();
-    }));
-    if (state.activeConv) wireThread($main);
+    wireConvList($main);
+    if (state.activeConv) { wireThreadHeader($main); wireComposer($main); }
     const scroll = $main.querySelector('.thread-msgs');
     if (scroll) scroll.scrollTop = scroll.scrollHeight;
   }
 
-  function renderThread() {
+  // Background refresh for the inbox: updates only the regions whose data
+  // changed — never rebuilds the composer or action bar unnecessarily, and
+  // preserves the reading position unless the user was already at the bottom.
+  async function updateInbox() {
+    const $main = document.getElementById('main');
+    if (!$main || state.route !== 'inbox') return;
+    await loadConversations();
+    const convJson = JSON.stringify(state.conversations);
+    const listEl = $main.querySelector('.conv-scroll');
+    if (listEl && convJson !== state._convJson) {
+      state._convJson = convJson;
+      listEl.innerHTML = convListHtml();
+      wireConvList($main);
+    }
+    if (!state.activeConvId || !$main.querySelector('.thread-msgs')) return;
+    try { await loadMessages(state.activeConvId); } catch { return; }
+    const msgJson = JSON.stringify(state.messages);
+    const metaJson = JSON.stringify([
+      state.activeConv.status, state.activeConv.assigned_user_id, state.activeConv.ai_enabled,
+      state.activeConv.ai_agent_id, state.activeConv.required_skill,
+    ]);
+    const msgsEl = $main.querySelector('.thread-msgs');
+    if (msgsEl && msgJson !== state._msgJson) {
+      state._msgJson = msgJson;
+      const nearBottom = msgsEl.scrollHeight - msgsEl.scrollTop - msgsEl.clientHeight < 100;
+      const prevTop = msgsEl.scrollTop;
+      msgsEl.innerHTML = messagesHtml();
+      msgsEl.scrollTop = nearBottom ? msgsEl.scrollHeight : prevTop;
+    }
+    // Only rebuild the action bar when its data actually changed, and never
+    // while the user is interacting with the assignment dropdown.
+    const activeId = document.activeElement?.id;
+    if (metaJson !== state._metaJson && activeId !== 'assign-select') {
+      state._metaJson = metaJson;
+      const header = $main.querySelector('.thread-header');
+      if (header) {
+        header.outerHTML = threadHeaderHtml();
+        wireThreadHeader($main);
+      }
+      const panel = $main.querySelector('.contact-panel');
+      if (panel) panel.outerHTML = renderContactPanel();
+    }
+  }
+
+  // The action bar is built synchronously from the cached team list so it
+  // renders complete in one paint (no async fill-in flicker).
+  function threadHeaderHtml() {
     const c = state.activeConv;
+    const users = (state.users || []).filter((u) => u.is_active);
     return `
-      <div class="thread">
         <div class="thread-header">
           <span class="avatar">${initials(c.contact_name)}</span>
           <div class="info">
@@ -379,16 +447,21 @@
             ${statusBadge(c.status)}
             ${c.required_skill ? `<span class="badge amber">🏷 ${esc(c.required_skill)}</span>` : ''}
             ${c.ai_enabled ? `<span class="badge purple">🤖 ${esc(c.ai_agent_name)}</span>` : ''}
-            <select class="input" id="assign-select" style="width:auto;padding:5px 8px"></select>
+            <select class="input" id="assign-select" style="width:auto;padding:5px 8px">
+              <option value="">Unassigned</option>
+              ${users.map((u) => `<option value="${u.id}" ${u.id === c.assigned_user_id ? 'selected' : ''}>${esc(u.name)}${u.available ? '' : ' (away)'}</option>`).join('')}
+            </select>
             <button class="btn small secondary" id="ai-toggle">${c.ai_enabled ? 'Disable AI' : 'Enable AI'}</button>
             ${c.status !== 'resolved'
               ? '<button class="btn small" id="resolve-btn">✓ Resolve</button>'
               : '<button class="btn small secondary" id="reopen-btn">Reopen</button>'}
             <button class="icon-btn" id="info-toggle" title="Contact info & history">ℹ️</button>
           </div>
-        </div>
-        <div class="thread-msgs">
-          ${(() => {
+        </div>`;
+  }
+
+  function messagesHtml() {
+    return (() => {
             let prevKey = null;
             return state.messages.map((m) => {
               if (m.sender_type === 'system') {
@@ -421,8 +494,11 @@
                   : `<span class="bubble-btn">↩ ${esc(b.text)}</span>`).join('')}</div>` : ''}
               </div>`;
             }).join('');
-          })()}
-        </div>
+          })();
+  }
+
+  function composerHtml() {
+    return `
         <div class="composer-wrap">
           <div id="attach-preview"></div>
           <div class="composer">
@@ -431,8 +507,7 @@
             <textarea id="composer-input" rows="1" placeholder="Type a reply, or paste a screenshot… (Enter to send)"></textarea>
             <button class="btn send-btn" id="send-btn" title="Send">➤</button>
           </div>
-        </div>
-      </div>`;
+        </div>`;
   }
 
   let composerAttachment = null; // { file, kind, previewUrl }
@@ -517,7 +592,49 @@
       </aside>`;
   }
 
-  function wireThread($main) {
+  // Wire only the action bar (header). Kept separate so background refreshes
+  // can rebuild the header without touching the composer, and vice versa.
+  function wireThreadHeader($main) {
+    const c = state.activeConv;
+    const byId = (id) => $main.querySelector('#' + id);
+
+    const sel = byId('assign-select');
+    if (sel) sel.addEventListener('change', async () => {
+      await api(`/conversations/${c.id}`, { method: 'PATCH', body: { assigned_user_id: sel.value ? Number(sel.value) : null } });
+      await loadMessages(c.id); await loadConversations(); renderRoute();
+    });
+
+    const aiToggle = byId('ai-toggle');
+    if (aiToggle) aiToggle.addEventListener('click', async () => {
+      if (c.ai_enabled) {
+        await api(`/conversations/${c.id}`, { method: 'PATCH', body: { ai_enabled: false } });
+      } else {
+        const agents = (await api('/ai-agents')).filter((a) => a.is_active);
+        if (!agents.length) return toast('No active AI agents. Create one in the AI Agents page.', true);
+        await api(`/conversations/${c.id}`, { method: 'PATCH', body: { ai_enabled: true, ai_agent_id: agents[0].id } });
+      }
+      await loadMessages(c.id); await loadConversations(); renderRoute();
+    });
+
+    const resolveBtn = byId('resolve-btn');
+    if (resolveBtn) resolveBtn.addEventListener('click', async () => {
+      await api(`/conversations/${c.id}`, { method: 'PATCH', body: { status: 'resolved' } });
+      await loadMessages(c.id); await loadConversations(); renderRoute();
+    });
+    const reopenBtn = byId('reopen-btn');
+    if (reopenBtn) reopenBtn.addEventListener('click', async () => {
+      await api(`/conversations/${c.id}`, { method: 'PATCH', body: { status: 'open' } });
+      await loadMessages(c.id); await loadConversations(); renderRoute();
+    });
+
+    const infoToggle = byId('info-toggle');
+    if (infoToggle) infoToggle.addEventListener('click', () => {
+      state.infoOpen = !state.infoOpen;
+      renderRoute();
+    });
+  }
+
+  function wireComposer($main) {
     const c = state.activeConv;
     const send = async () => {
       const input = document.getElementById('composer-input');
@@ -557,45 +674,6 @@
     });
     renderAttachPreview();
     composerInput.focus();
-
-    document.getElementById('info-toggle').addEventListener('click', () => {
-      state.infoOpen = !state.infoOpen;
-      renderRoute();
-    });
-
-    // Assignment dropdown
-    api('/users').then((users) => {
-      const sel = document.getElementById('assign-select');
-      if (!sel) return;
-      sel.innerHTML = `<option value="">Unassigned</option>` + users.filter((u) => u.is_active)
-        .map((u) => `<option value="${u.id}" ${u.id === c.assigned_user_id ? 'selected' : ''}>${esc(u.name)}${u.available ? '' : ' (away)'}</option>`).join('');
-      sel.addEventListener('change', async () => {
-        await api(`/conversations/${c.id}`, { method: 'PATCH', body: { assigned_user_id: sel.value ? Number(sel.value) : null } });
-        await loadMessages(c.id); await loadConversations(); renderRoute();
-      });
-    });
-
-    document.getElementById('ai-toggle').addEventListener('click', async () => {
-      if (c.ai_enabled) {
-        await api(`/conversations/${c.id}`, { method: 'PATCH', body: { ai_enabled: false } });
-      } else {
-        const agents = (await api('/ai-agents')).filter((a) => a.is_active);
-        if (!agents.length) return toast('No active AI agents. Create one in the AI Agents page.', true);
-        await api(`/conversations/${c.id}`, { method: 'PATCH', body: { ai_enabled: true, ai_agent_id: agents[0].id } });
-      }
-      await loadMessages(c.id); await loadConversations(); renderRoute();
-    });
-
-    const resolveBtn = document.getElementById('resolve-btn');
-    if (resolveBtn) resolveBtn.addEventListener('click', async () => {
-      await api(`/conversations/${c.id}`, { method: 'PATCH', body: { status: 'resolved' } });
-      await loadMessages(c.id); await loadConversations(); renderRoute();
-    });
-    const reopenBtn = document.getElementById('reopen-btn');
-    if (reopenBtn) reopenBtn.addEventListener('click', async () => {
-      await api(`/conversations/${c.id}`, { method: 'PATCH', body: { status: 'open' } });
-      await loadMessages(c.id); await loadConversations(); renderRoute();
-    });
   }
 
   // ---------- Contacts ----------
