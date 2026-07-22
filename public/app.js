@@ -121,7 +121,13 @@
     pollTimer = setInterval(() => refreshCurrentView().catch(() => {}), 4000);
   }
 
-  function connectEvents() {
+  async function connectEvents() {
+    // On serverless hosts SSE connections look healthy but never receive
+    // events emitted by other instances — poll instead.
+    try {
+      const cfg = await api('/config');
+      if (cfg.serverless) { startPolling(); return; }
+    } catch { /* fall through to SSE */ }
     if (es) es.close();
     es = new EventSource('/api/events?token=' + encodeURIComponent(state.token));
     es.onopen = () => { sseFailures = 0; };

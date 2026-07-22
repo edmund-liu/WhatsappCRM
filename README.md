@@ -79,21 +79,35 @@ watch the AI agent pick it up and reply. Send "I want to talk to a human" — wa
 handoff and round-robin assignment. Create a broadcast from the Broadcasts page and watch
 the delivery stats fill in live.
 
+## Database backends
+
+The app picks its database automatically:
+
+- **No configuration** → built-in SQLite (`node:sqlite`), file in `./data`. Perfect for
+  local use and always-on hosts.
+- **`DATABASE_URL` (or `POSTGRES_URL`) set** → Postgres. Required for serverless hosting:
+  the schema is created and seeded automatically on first start.
+
 ## Deploying to Vercel
 
 The repo includes `api/index.js` + `vercel.json`, so importing the project into Vercel
-works out of the box (set the project's Node.js version to 22.x). Set a `JWT_SECRET`
-environment variable in the project settings so logins survive across instances.
+works out of the box (set the project's Node.js version to 22.x). Configure two
+environment variables in the project settings:
 
-Serverless caveats — Vercel is great for demoing, but note:
+1. **`DATABASE_URL`** — a Postgres connection string. Free options: [Neon](https://neon.tech),
+   Vercel Postgres/Marketplace, or Supabase. **Without this, Vercel falls back to SQLite in
+   `/tmp`, which is wiped on cold starts and NOT shared between function instances — data
+   will appear and disappear randomly (e.g. simulated messages never showing up).**
+2. **`JWT_SECRET`** — any long random string, so logins survive across instances.
 
-- **Data is ephemeral.** SQLite lives in `/tmp`, which resets on cold starts and is not
-  shared between instances. Every reset reseeds the demo accounts and sample data. For
-  real usage run the app on an always-on host (Railway, Render, Fly.io, a VPS) where the
-  database file persists.
+Remaining serverless caveats:
+
 - **Scheduled broadcasts don't fire** (no background scheduler); "Send now" works — the
   send completes within the request (60s max, so keep audiences modest).
-- Live updates automatically fall back from SSE to polling every few seconds.
+- Live updates use polling on serverless (SSE can't span function instances); on
+  always-on hosts SSE is used automatically.
+- Uploaded media lives on ephemeral disk unless you add object storage; the database
+  itself is fully persistent with Postgres.
 
 ## Going live with the real WhatsApp Cloud API
 

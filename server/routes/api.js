@@ -4,7 +4,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import bcrypt from 'bcryptjs';
-import db, { getSetting, setSetting, computeParamMap, UPLOADS_DIR } from '../db.js';
+import db, { getSetting, setSetting, computeParamMap, UPLOADS_DIR, SQL } from '../db.js';
 import { signToken, requireAuth, requireAdmin } from '../auth.js';
 import { emit, sseHandler } from '../services/events.js';
 import { sendText, sendMedia, isSandbox, markConversationRead, pullTemplatesFromMeta, pushTemplateToMeta } from '../services/whatsapp.js';
@@ -16,9 +16,9 @@ import { SERVERLESS } from '../runtime.js';
 const router = Router();
 
 // ---------- Auth ----------
-router.post('/auth/login', (req, res) => {
+router.post('/auth/login', async (req, res) => {
   const { email, password } = req.body || {};
-  const user = db.prepare('SELECT * FROM users WHERE email = ?').get(String(email || '').toLowerCase().trim());
+  const user = await db.prepare('SELECT * FROM users WHERE email = ?').get(String(email || '').toLowerCase().trim());
   if (!user || !bcrypt.compareSync(String(password || ''), user.password_hash)) {
     return res.status(401).json({ error: 'Invalid email or password' });
   }
@@ -33,10 +33,15 @@ router.use(requireAuth);
 
 router.get('/me', (req, res) => res.json(req.user));
 
-router.patch('/me/availability', (req, res) => {
+router.patch('/me/availability', async (req, res) => {
   const available = req.body.available ? 1 : 0;
-  db.prepare('UPDATE users SET available = ? WHERE id = ?').run(available, req.user.id);
+  await db.prepare('UPDATE users SET available = ? WHERE id = ?').run(available, req.user.id);
   res.json({ ok: true, available });
+});
+
+// ---------- Client runtime config ----------
+router.get('/config', async (req, res) => {
+  res.json({ serverless: SERVERLESS, sandbox: await isSandbox() });
 });
 
 // ---------- Events (SSE) ----------
@@ -68,29 +73,29 @@ router.post('/uploads', express.raw({ type: () => true, limit: '10mb' }), (req, 
 });
 
 // ---------- Team (users) ----------
-router.get('/users', (req, res) => {
-  const rows = db.prepare('SELECT id, name, email, role, is_active, available, skills, created_at FROM users ORDER BY id').all();
+router.get('/users', async (req, res) => {
+  const rows = await db.prepare('SELECT id, name, email, role, is_active, available, skills, created_at FROM users ORDER BY id').all();
   res.json(rows.map((u) => ({ ...u, skills: JSON.parse(u.skills || '[]') })));
 });
 
-router.post('/users', requireAdmin, (req, res) => {
+router.post('/users', requireAdmin, async (req, res) => {
   const { name, email, password, role, skills } = req.body || {};
   if (!name || !email || !password) return res.status(400).json({ error: 'name, email and password are required' });
   try {
-    const info = db.prepare('INSERT INTO users (name, email, password_hash, role, skills) VALUES (?, ?, ?, ?, ?)')
+    const info = await db.prepare('INSERT INTO users (name, email, password_hash, role, skills) VALUES (?, ?, ?, ?, ?)')
       .run(name, String(email).toLowerCase().trim(), bcrypt.hashSync(password, 10), role === 'admin' ? 'admin' : 'agent',
         JSON.stringify(Array.isArray(skills) ? skills : []));
-    res.json(db.prepare('SELECT id, name, email, role, is_active, available, skills FROM users WHERE id = ?').get(info.lastInsertRowid));
+    res.json(await db.prepare('SELECT id, name, email, role, is_active, available, skills FROM users WHERE id = ?').get(info.lastInsertRowid));
   } catch {
     res.status(400).json({ error: 'Email already in use' });
   }
 });
 
-router.patch('/users/:id', requireAdmin, (req, res) => {
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+router.patch('/users/:id', requireAdmin, async (req, res) => {
+  const user = await db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { name, role, is_active, available, password, skills } = req.body || {};
-  db.prepare('UPDATE users SET name = ?, role = ?, is_active = ?, available = ?, skills = ? WHERE id = ?').run(
+  await db.prepare('UPDATE users SET name = ?, role = ?, is_active = ?, available = ?, skills = ? WHERE id = ?').run(
     name ?? user.name,
     role === 'admin' || role === 'agent' ? role : user.role,
     is_active === undefined ? user.is_active : (is_active ? 1 : 0),
@@ -98,48 +103,48 @@ router.patch('/users/:id', requireAdmin, (req, res) => {
     Array.isArray(skills) ? JSON.stringify(skills) : user.skills,
     user.id
   );
-  if (password) db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(password, 10), user.id);
+  if (password) await db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(password, 10), user.id);
   res.json({ ok: true });
 });
 
 // ---------- Routing skills ----------
-router.get('/skills', (req, res) => {
-  res.json(db.prepare('SELECT * FROM skills ORDER BY name').all()
+router.get('/skills', async (req, res) => {
+  res.json((await db.prepare('SELECT * FROM skills ORDER BY name').all())
     .map((s) => ({ ...s, keywords: JSON.parse(s.keywords) })));
 });
 
-router.post('/skills', requireAdmin, (req, res) => {
+router.post('/skills', requireAdmin, async (req, res) => {
   const { name, keywords } = req.body || {};
   const slug = String(name || '').toLowerCase().trim().replace(/\s+/g, '-');
   if (!slug) return res.status(400).json({ error: 'name is required' });
   try {
-    const info = db.prepare('INSERT INTO skills (name, keywords) VALUES (?, ?)')
+    const info = await db.prepare('INSERT INTO skills (name, keywords) VALUES (?, ?)')
       .run(slug, JSON.stringify(Array.isArray(keywords) ? keywords : []));
-    res.json(db.prepare('SELECT * FROM skills WHERE id = ?').get(info.lastInsertRowid));
+    res.json(await db.prepare('SELECT * FROM skills WHERE id = ?').get(info.lastInsertRowid));
   } catch {
     res.status(400).json({ error: 'A skill with that name already exists' });
   }
 });
 
-router.patch('/skills/:id', requireAdmin, (req, res) => {
-  const skill = db.prepare('SELECT * FROM skills WHERE id = ?').get(req.params.id);
+router.patch('/skills/:id', requireAdmin, async (req, res) => {
+  const skill = await db.prepare('SELECT * FROM skills WHERE id = ?').get(req.params.id);
   if (!skill) return res.status(404).json({ error: 'Skill not found' });
   const { keywords } = req.body || {};
-  db.prepare('UPDATE skills SET keywords = ? WHERE id = ?')
+  await db.prepare('UPDATE skills SET keywords = ? WHERE id = ?')
     .run(Array.isArray(keywords) ? JSON.stringify(keywords) : skill.keywords, skill.id);
   res.json({ ok: true });
 });
 
-router.delete('/skills/:id', requireAdmin, (req, res) => {
-  const skill = db.prepare('SELECT * FROM skills WHERE id = ?').get(req.params.id);
+router.delete('/skills/:id', requireAdmin, async (req, res) => {
+  const skill = await db.prepare('SELECT * FROM skills WHERE id = ?').get(req.params.id);
   if (!skill) return res.status(404).json({ error: 'Skill not found' });
-  db.prepare('DELETE FROM skills WHERE id = ?').run(skill.id);
+  await db.prepare('DELETE FROM skills WHERE id = ?').run(skill.id);
   // Remove the skill from any user or AI agent that lists it.
   for (const table of ['users', 'ai_agents']) {
-    for (const row of db.prepare(`SELECT id, skills FROM ${table}`).all()) {
+    for (const row of await db.prepare(`SELECT id, skills FROM ${table}`).all()) {
       const skills = JSON.parse(row.skills || '[]');
       if (skills.includes(skill.name)) {
-        db.prepare(`UPDATE ${table} SET skills = ? WHERE id = ?`)
+        await db.prepare(`UPDATE ${table} SET skills = ? WHERE id = ?`)
           .run(JSON.stringify(skills.filter((s) => s !== skill.name)), row.id);
       }
     }
@@ -148,30 +153,30 @@ router.delete('/skills/:id', requireAdmin, (req, res) => {
 });
 
 // ---------- Contacts ----------
-router.get('/contacts', (req, res) => {
-  const rows = db.prepare('SELECT * FROM contacts ORDER BY COALESCE(last_message_at, created_at) DESC').all();
+router.get('/contacts', async (req, res) => {
+  const rows = await db.prepare('SELECT * FROM contacts ORDER BY COALESCE(last_message_at, created_at) DESC').all();
   res.json(rows.map((c) => ({ ...c, tags: JSON.parse(c.tags), attributes: JSON.parse(c.attributes) })));
 });
 
-router.post('/contacts', (req, res) => {
+router.post('/contacts', async (req, res) => {
   const { wa_id, name, tags } = req.body || {};
   const phone = String(wa_id || '').replace(/\D/g, '');
   if (!phone) return res.status(400).json({ error: 'A valid phone number (wa_id) is required' });
   try {
-    const info = db.prepare('INSERT INTO contacts (wa_id, name, tags) VALUES (?, ?, ?)')
+    const info = await db.prepare('INSERT INTO contacts (wa_id, name, tags) VALUES (?, ?, ?)')
       .run(phone, name || null, JSON.stringify(Array.isArray(tags) ? tags : []));
     emit('contact_created', { contact_id: info.lastInsertRowid });
-    res.json(db.prepare('SELECT * FROM contacts WHERE id = ?').get(info.lastInsertRowid));
+    res.json(await db.prepare('SELECT * FROM contacts WHERE id = ?').get(info.lastInsertRowid));
   } catch {
     res.status(400).json({ error: 'A contact with that phone number already exists' });
   }
 });
 
-router.patch('/contacts/:id', (req, res) => {
-  const contact = db.prepare('SELECT * FROM contacts WHERE id = ?').get(req.params.id);
+router.patch('/contacts/:id', async (req, res) => {
+  const contact = await db.prepare('SELECT * FROM contacts WHERE id = ?').get(req.params.id);
   if (!contact) return res.status(404).json({ error: 'Contact not found' });
   const { name, tags, opted_out } = req.body || {};
-  db.prepare('UPDATE contacts SET name = ?, tags = ?, opted_out = ? WHERE id = ?').run(
+  await db.prepare('UPDATE contacts SET name = ?, tags = ?, opted_out = ? WHERE id = ?').run(
     name ?? contact.name,
     Array.isArray(tags) ? JSON.stringify(tags) : contact.tags,
     opted_out === undefined ? contact.opted_out : (opted_out ? 1 : 0),
@@ -181,7 +186,7 @@ router.patch('/contacts/:id', (req, res) => {
 });
 
 // ---------- Conversations & messages ----------
-router.get('/conversations', (req, res) => {
+router.get('/conversations', async (req, res) => {
   const { filter, status } = req.query;
   let where = '1=1';
   const params = [];
@@ -189,7 +194,7 @@ router.get('/conversations', (req, res) => {
   if (filter === 'mine') { where += ' AND cv.assigned_user_id = ?'; params.push(req.user.id); }
   if (filter === 'unassigned') where += ' AND cv.assigned_user_id IS NULL AND cv.ai_enabled = 0';
   if (filter === 'ai') where += ' AND cv.ai_enabled = 1';
-  const rows = db.prepare(`
+  const rows = await db.prepare(`
     SELECT cv.*, c.name AS contact_name, c.wa_id, u.name AS assigned_name, a.name AS ai_agent_name
     FROM conversations cv
     JOIN contacts c ON c.id = cv.contact_id
@@ -201,8 +206,8 @@ router.get('/conversations', (req, res) => {
   res.json(rows);
 });
 
-router.get('/conversations/:id', (req, res) => {
-  const conv = db.prepare(`
+router.get('/conversations/:id', async (req, res) => {
+  const conv = await db.prepare(`
     SELECT cv.*, c.name AS contact_name, c.wa_id, c.tags AS contact_tags, u.name AS assigned_name, a.name AS ai_agent_name
     FROM conversations cv
     JOIN contacts c ON c.id = cv.contact_id
@@ -214,17 +219,17 @@ router.get('/conversations/:id', (req, res) => {
   res.json({ ...conv, contact_tags: JSON.parse(conv.contact_tags) });
 });
 
-router.get('/conversations/:id/messages', (req, res) => {
-  const rows = db.prepare(`
+router.get('/conversations/:id/messages', async (req, res) => {
+  const rows = await db.prepare(`
     SELECT m.*, u.name AS sender_name, a.name AS ai_agent_name
     FROM messages m
     LEFT JOIN users u ON u.id = m.sender_user_id
     LEFT JOIN ai_agents a ON a.id = m.ai_agent_id
     WHERE m.conversation_id = ? ORDER BY m.id
   `).all(req.params.id);
-  const conv = db.prepare('SELECT unread_count FROM conversations WHERE id = ?').get(req.params.id);
+  const conv = await db.prepare('SELECT unread_count FROM conversations WHERE id = ?').get(req.params.id);
   if (conv?.unread_count) {
-    db.prepare('UPDATE conversations SET unread_count = 0 WHERE id = ?').run(req.params.id);
+    await db.prepare('UPDATE conversations SET unread_count = 0 WHERE id = ?').run(req.params.id);
     // Sync the read state back to Meta so the customer sees blue ticks.
     markConversationRead(Number(req.params.id)).catch((err) => console.error('Read-receipt sync failed:', err.message));
   }
@@ -232,13 +237,13 @@ router.get('/conversations/:id/messages', (req, res) => {
 });
 
 router.post('/conversations/:id/messages', async (req, res) => {
-  const conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get(req.params.id);
+  const conv = await db.prepare('SELECT * FROM conversations WHERE id = ?').get(req.params.id);
   if (!conv) return res.status(404).json({ error: 'Conversation not found' });
   const text = String(req.body?.text || '').trim();
   const mediaUrl = req.body?.media_url || null;
   const mediaType = ['image', 'audio'].includes(req.body?.media_type) ? req.body.media_type : (mediaUrl ? 'image' : null);
   if (!text && !mediaUrl) return res.status(400).json({ error: 'Message text or an attachment is required' });
-  const contact = db.prepare('SELECT * FROM contacts WHERE id = ?').get(conv.contact_id);
+  const contact = await db.prepare('SELECT * FROM contacts WHERE id = ?').get(conv.contact_id);
   try {
     let waMessageId;
     if (mediaUrl) {
@@ -248,41 +253,41 @@ router.post('/conversations/:id/messages', async (req, res) => {
     } else {
       waMessageId = await sendText(contact.wa_id, text);
     }
-    const info = db.prepare(
+    const info = await db.prepare(
       "INSERT INTO messages (conversation_id, direction, sender_type, sender_user_id, type, body, wa_message_id, status, media_url) VALUES (?, 'out', 'agent', ?, ?, ?, ?, 'sent', ?)"
     ).run(conv.id, req.user.id, mediaType || 'text', text, waMessageId, mediaUrl);
     const preview = mediaType === 'image' ? `📷 ${text || 'Photo'}` : mediaType === 'audio' ? '🎤 Voice message' : text;
     // A human replying takes the conversation over from the AI.
-    db.prepare(
-      "UPDATE conversations SET last_message_at = datetime('now'), last_message_preview = ?, ai_enabled = 0, assigned_user_id = COALESCE(assigned_user_id, ?) WHERE id = ?"
+    await db.prepare(
+      'UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP, last_message_preview = ?, ai_enabled = 0, assigned_user_id = COALESCE(assigned_user_id, ?) WHERE id = ?'
     ).run(preview.slice(0, 120), req.user.id, conv.id);
-    if (conv.ai_enabled) addSystemNote(conv.id, `${req.user.name} took over from AI`);
+    if (conv.ai_enabled) await addSystemNote(conv.id, `${req.user.name} took over from AI`);
     emit('message_created', { conversation_id: conv.id });
     emit('conversation_updated', { conversation_id: conv.id });
-    res.json(db.prepare('SELECT * FROM messages WHERE id = ?').get(info.lastInsertRowid));
+    res.json(await db.prepare('SELECT * FROM messages WHERE id = ?').get(info.lastInsertRowid));
   } catch (err) {
     res.status(502).json({ error: `Send failed: ${err.message}` });
   }
 });
 
-router.patch('/conversations/:id', (req, res) => {
-  const conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get(req.params.id);
+router.patch('/conversations/:id', async (req, res) => {
+  const conv = await db.prepare('SELECT * FROM conversations WHERE id = ?').get(req.params.id);
   if (!conv) return res.status(404).json({ error: 'Conversation not found' });
   const { status, assigned_user_id, ai_enabled, ai_agent_id } = req.body || {};
   if (status && ['open', 'pending', 'resolved'].includes(status)) {
-    db.prepare('UPDATE conversations SET status = ? WHERE id = ?').run(status, conv.id);
-    addSystemNote(conv.id, `Marked as ${status} by ${req.user.name}`);
+    await db.prepare('UPDATE conversations SET status = ? WHERE id = ?').run(status, conv.id);
+    await addSystemNote(conv.id, `Marked as ${status} by ${req.user.name}`);
   }
   if (assigned_user_id !== undefined) {
-    assignConversation(conv.id, assigned_user_id || null, { by: req.user.name });
+    await assignConversation(conv.id, assigned_user_id || null, { by: req.user.name });
   }
   if (ai_agent_id !== undefined || ai_enabled !== undefined) {
     const agentId = ai_agent_id !== undefined ? ai_agent_id : conv.ai_agent_id;
     const enabled = ai_enabled !== undefined ? (ai_enabled ? 1 : 0) : conv.ai_enabled;
-    db.prepare('UPDATE conversations SET ai_enabled = ?, ai_agent_id = ? WHERE id = ?').run(enabled && agentId ? 1 : 0, agentId || null, conv.id);
+    await db.prepare('UPDATE conversations SET ai_enabled = ?, ai_agent_id = ? WHERE id = ?').run(enabled && agentId ? 1 : 0, agentId || null, conv.id);
     if (enabled && agentId) {
-      const agent = db.prepare('SELECT name FROM ai_agents WHERE id = ?').get(agentId);
-      addSystemNote(conv.id, `🤖 ${agent?.name || 'AI agent'} enabled by ${req.user.name}`);
+      const agent = await db.prepare('SELECT name FROM ai_agents WHERE id = ?').get(agentId);
+      await addSystemNote(conv.id, `🤖 ${agent?.name || 'AI agent'} enabled by ${req.user.name}`);
     }
   }
   emit('conversation_updated', { conversation_id: conv.id });
@@ -290,21 +295,21 @@ router.patch('/conversations/:id', (req, res) => {
 });
 
 // Start a fresh outbound conversation with a contact.
-router.post('/conversations', (req, res) => {
-  const contact = db.prepare('SELECT * FROM contacts WHERE id = ?').get(req.body?.contact_id);
+router.post('/conversations', async (req, res) => {
+  const contact = await db.prepare('SELECT * FROM contacts WHERE id = ?').get(req.body?.contact_id);
   if (!contact) return res.status(404).json({ error: 'Contact not found' });
-  let conv = db.prepare("SELECT * FROM conversations WHERE contact_id = ? AND status != 'resolved' ORDER BY id DESC LIMIT 1").get(contact.id);
+  let conv = await db.prepare("SELECT * FROM conversations WHERE contact_id = ? AND status != 'resolved' ORDER BY id DESC LIMIT 1").get(contact.id);
   if (!conv) {
-    const info = db.prepare("INSERT INTO conversations (contact_id, status, assigned_user_id) VALUES (?, 'open', ?)").run(contact.id, req.user.id);
-    conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get(info.lastInsertRowid);
+    const info = await db.prepare("INSERT INTO conversations (contact_id, status, assigned_user_id) VALUES (?, 'open', ?)").run(contact.id, req.user.id);
+    conv = await db.prepare('SELECT * FROM conversations WHERE id = ?').get(info.lastInsertRowid);
     emit('conversation_updated', { conversation_id: conv.id });
   }
   res.json(conv);
 });
 
 // ---------- Templates ----------
-router.get('/templates', (req, res) => {
-  res.json(db.prepare('SELECT * FROM templates ORDER BY id DESC').all()
+router.get('/templates', async (req, res) => {
+  res.json((await db.prepare('SELECT * FROM templates ORDER BY id DESC').all())
     .map((t) => ({ ...t, buttons: JSON.parse(t.buttons || '[]') })));
 });
 
@@ -328,7 +333,7 @@ function validateButtons(buttons) {
   return { ok: true, value: JSON.stringify(clean) };
 }
 
-router.post('/templates', (req, res) => {
+router.post('/templates', async (req, res) => {
   const { name, language, category, body, header_image_url, buttons } = req.body || {};
   if (!name || !body) return res.status(400).json({ error: 'name and body are required' });
   const btn = validateButtons(buttons);
@@ -337,11 +342,11 @@ router.post('/templates', (req, res) => {
     return res.status(400).json({ error: 'header_image_url must be a public http(s) URL' });
   }
   try {
-    const info = db.prepare(
+    const info = await db.prepare(
       'INSERT INTO templates (name, language, category, body, param_map, header_image_url, buttons) VALUES (?, ?, ?, ?, ?, ?, ?)'
     ).run(String(name).toLowerCase().replace(/\s+/g, '_'), language || 'en', category || 'MARKETING', body,
       JSON.stringify(computeParamMap(body)), header_image_url || null, btn.value);
-    res.json(db.prepare('SELECT * FROM templates WHERE id = ?').get(info.lastInsertRowid));
+    res.json(await db.prepare('SELECT * FROM templates WHERE id = ?').get(info.lastInsertRowid));
   } catch {
     res.status(400).json({ error: 'A template with that name already exists' });
   }
@@ -359,7 +364,7 @@ router.post('/templates/sync', requireAdmin, async (req, res) => {
 
 // Submit a local template to Meta for approval.
 router.post('/templates/:id/submit', requireAdmin, async (req, res) => {
-  const template = db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id);
+  const template = await db.prepare('SELECT * FROM templates WHERE id = ?').get(req.params.id);
   if (!template) return res.status(404).json({ error: 'Template not found' });
   try {
     const out = await pushTemplateToMeta(template);
@@ -369,33 +374,33 @@ router.post('/templates/:id/submit', requireAdmin, async (req, res) => {
   }
 });
 
-router.delete('/templates/:id', requireAdmin, (req, res) => {
-  const used = db.prepare('SELECT COUNT(*) AS c FROM broadcasts WHERE template_id = ?').get(req.params.id).c;
+router.delete('/templates/:id', requireAdmin, async (req, res) => {
+  const used = (await db.prepare('SELECT COUNT(*) AS c FROM broadcasts WHERE template_id = ?').get(req.params.id)).c;
   if (used) return res.status(400).json({ error: 'Template is used by existing broadcasts' });
-  db.prepare('DELETE FROM templates WHERE id = ?').run(req.params.id);
+  await db.prepare('DELETE FROM templates WHERE id = ?').run(req.params.id);
   res.json({ ok: true });
 });
 
 // ---------- Broadcasts ----------
-router.get('/broadcasts', (req, res) => {
-  const rows = db.prepare(`
+router.get('/broadcasts', async (req, res) => {
+  const rows = await db.prepare(`
     SELECT b.*, t.name AS template_name, u.name AS created_by_name
     FROM broadcasts b JOIN templates t ON t.id = b.template_id
     LEFT JOIN users u ON u.id = b.created_by
     ORDER BY b.id DESC
   `).all();
-  res.json(rows.map((b) => ({ ...b, stats: broadcastStats(b.id) })));
+  res.json(await Promise.all(rows.map(async (b) => ({ ...b, stats: await broadcastStats(b.id) }))));
 });
 
 router.post('/broadcasts', async (req, res) => {
   const { name, template_id, variables, audience_tag, scheduled_at, send_now, header_image_url } = req.body || {};
-  const template = db.prepare('SELECT * FROM templates WHERE id = ?').get(template_id);
+  const template = await db.prepare('SELECT * FROM templates WHERE id = ?').get(template_id);
   if (!name || !template) return res.status(400).json({ error: 'name and a valid template_id are required' });
   if (header_image_url && !/^https?:\/\//.test(header_image_url)) {
     return res.status(400).json({ error: 'header_image_url must be a public http(s) URL' });
   }
   const status = send_now ? 'sending' : scheduled_at ? 'scheduled' : 'draft';
-  const info = db.prepare(
+  const info = await db.prepare(
     'INSERT INTO broadcasts (name, template_id, variables, audience_tag, status, scheduled_at, created_by, header_image_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
   ).run(name, template.id, JSON.stringify(variables || []), audience_tag || null, status, scheduled_at || null, req.user.id, header_image_url || null);
   const id = info.lastInsertRowid;
@@ -403,16 +408,16 @@ router.post('/broadcasts', async (req, res) => {
     const run = startBroadcast(id);
     if (SERVERLESS) await run; // background work dies with the response on serverless
   }
-  res.json(db.prepare('SELECT * FROM broadcasts WHERE id = ?').get(id));
+  res.json(await db.prepare('SELECT * FROM broadcasts WHERE id = ?').get(id));
 });
 
-router.get('/broadcasts/:id/audience-preview', (req, res) => {
-  const audience = audienceForBroadcast({ audience_tag: req.query.tag || null });
+router.get('/broadcasts/:id/audience-preview', async (req, res) => {
+  const audience = await audienceForBroadcast({ audience_tag: req.query.tag || null });
   res.json({ count: audience.length });
 });
 
 router.post('/broadcasts/:id/send', async (req, res) => {
-  const b = db.prepare('SELECT * FROM broadcasts WHERE id = ?').get(req.params.id);
+  const b = await db.prepare('SELECT * FROM broadcasts WHERE id = ?').get(req.params.id);
   if (!b) return res.status(404).json({ error: 'Broadcast not found' });
   if (['completed', 'cancelled'].includes(b.status)) return res.status(400).json({ error: `Broadcast already ${b.status}` });
   const run = startBroadcast(b.id);
@@ -420,34 +425,34 @@ router.post('/broadcasts/:id/send', async (req, res) => {
   res.json({ ok: true });
 });
 
-router.post('/broadcasts/:id/cancel', (req, res) => {
-  db.prepare("UPDATE broadcasts SET status = 'cancelled' WHERE id = ? AND status IN ('draft','scheduled','sending')").run(req.params.id);
+router.post('/broadcasts/:id/cancel', async (req, res) => {
+  await db.prepare("UPDATE broadcasts SET status = 'cancelled' WHERE id = ? AND status IN ('draft','scheduled','sending')").run(req.params.id);
   emit('broadcast_progress', { broadcast_id: Number(req.params.id) });
   res.json({ ok: true });
 });
 
 // ---------- AI agents ----------
-router.get('/ai-agents', (req, res) => {
-  res.json(db.prepare('SELECT * FROM ai_agents ORDER BY id').all()
+router.get('/ai-agents', async (req, res) => {
+  res.json((await db.prepare('SELECT * FROM ai_agents ORDER BY id').all())
     .map((a) => ({ ...a, handoff_keywords: JSON.parse(a.handoff_keywords), skills: JSON.parse(a.skills || '[]') })));
 });
 
-router.post('/ai-agents', requireAdmin, (req, res) => {
+router.post('/ai-agents', requireAdmin, async (req, res) => {
   const { name, system_prompt, model, handoff_keywords, auto_assign_new, skills } = req.body || {};
   if (!name || !system_prompt) return res.status(400).json({ error: 'name and system_prompt are required' });
-  const info = db.prepare(
+  const info = await db.prepare(
     'INSERT INTO ai_agents (name, system_prompt, model, handoff_keywords, auto_assign_new, skills) VALUES (?, ?, ?, ?, ?, ?)'
   ).run(name, system_prompt, model || 'claude-haiku-4-5-20251001',
     JSON.stringify(Array.isArray(handoff_keywords) ? handoff_keywords : ['human', 'agent']), auto_assign_new ? 1 : 0,
     JSON.stringify(Array.isArray(skills) ? skills : []));
-  res.json(db.prepare('SELECT * FROM ai_agents WHERE id = ?').get(info.lastInsertRowid));
+  res.json(await db.prepare('SELECT * FROM ai_agents WHERE id = ?').get(info.lastInsertRowid));
 });
 
-router.patch('/ai-agents/:id', requireAdmin, (req, res) => {
-  const agent = db.prepare('SELECT * FROM ai_agents WHERE id = ?').get(req.params.id);
+router.patch('/ai-agents/:id', requireAdmin, async (req, res) => {
+  const agent = await db.prepare('SELECT * FROM ai_agents WHERE id = ?').get(req.params.id);
   if (!agent) return res.status(404).json({ error: 'AI agent not found' });
   const { name, system_prompt, model, handoff_keywords, is_active, auto_assign_new, skills } = req.body || {};
-  db.prepare(
+  await db.prepare(
     'UPDATE ai_agents SET name = ?, system_prompt = ?, model = ?, handoff_keywords = ?, is_active = ?, auto_assign_new = ?, skills = ? WHERE id = ?'
   ).run(
     name ?? agent.name,
@@ -463,49 +468,50 @@ router.patch('/ai-agents/:id', requireAdmin, (req, res) => {
 });
 
 // ---------- Settings ----------
-router.get('/settings', requireAdmin, (req, res) => {
+router.get('/settings', requireAdmin, async (req, res) => {
   res.json({
-    sandbox_mode: getSetting('sandbox_mode', '1') === '1',
-    wa_phone_number_id: getSetting('wa_phone_number_id', ''),
-    wa_waba_id: getSetting('wa_waba_id', ''),
-    wa_access_token_set: Boolean(getSetting('wa_access_token')),
-    wa_verify_token: getSetting('wa_verify_token', ''),
-    anthropic_api_key_set: Boolean(getSetting('anthropic_api_key') || process.env.ANTHROPIC_API_KEY),
+    sandbox_mode: (await getSetting('sandbox_mode', '1')) === '1',
+    wa_phone_number_id: await getSetting('wa_phone_number_id', ''),
+    wa_waba_id: await getSetting('wa_waba_id', ''),
+    wa_access_token_set: Boolean(await getSetting('wa_access_token')),
+    wa_verify_token: await getSetting('wa_verify_token', ''),
+    anthropic_api_key_set: Boolean((await getSetting('anthropic_api_key')) || process.env.ANTHROPIC_API_KEY),
   });
 });
 
-router.put('/settings', requireAdmin, (req, res) => {
+router.put('/settings', requireAdmin, async (req, res) => {
   const { sandbox_mode, wa_phone_number_id, wa_waba_id, wa_access_token, wa_verify_token, anthropic_api_key } = req.body || {};
-  if (sandbox_mode !== undefined) setSetting('sandbox_mode', sandbox_mode ? '1' : '0');
-  if (wa_phone_number_id !== undefined) setSetting('wa_phone_number_id', wa_phone_number_id);
-  if (wa_waba_id !== undefined) setSetting('wa_waba_id', wa_waba_id);
-  if (wa_access_token) setSetting('wa_access_token', wa_access_token);
-  if (wa_verify_token !== undefined) setSetting('wa_verify_token', wa_verify_token);
-  if (anthropic_api_key) setSetting('anthropic_api_key', anthropic_api_key);
+  if (sandbox_mode !== undefined) await setSetting('sandbox_mode', sandbox_mode ? '1' : '0');
+  if (wa_phone_number_id !== undefined) await setSetting('wa_phone_number_id', wa_phone_number_id);
+  if (wa_waba_id !== undefined) await setSetting('wa_waba_id', wa_waba_id);
+  if (wa_access_token) await setSetting('wa_access_token', wa_access_token);
+  if (wa_verify_token !== undefined) await setSetting('wa_verify_token', wa_verify_token);
+  if (anthropic_api_key) await setSetting('anthropic_api_key', anthropic_api_key);
   res.json({ ok: true });
 });
 
 // ---------- Analytics ----------
-router.get('/analytics', (req, res) => {
+router.get('/analytics', async (req, res) => {
+  const count = async (sql) => (await db.prepare(sql).get()).c;
   const counters = {
-    contacts: db.prepare('SELECT COUNT(*) AS c FROM contacts').get().c,
-    conversations_open: db.prepare("SELECT COUNT(*) AS c FROM conversations WHERE status = 'open'").get().c,
-    messages_in_24h: db.prepare("SELECT COUNT(*) AS c FROM messages WHERE direction = 'in' AND created_at > datetime('now','-1 day')").get().c,
-    messages_out_24h: db.prepare("SELECT COUNT(*) AS c FROM messages WHERE direction = 'out' AND sender_type != 'system' AND created_at > datetime('now','-1 day')").get().c,
-    ai_replies_24h: db.prepare("SELECT COUNT(*) AS c FROM messages WHERE sender_type = 'ai' AND created_at > datetime('now','-1 day')").get().c,
-    broadcasts_completed: db.prepare("SELECT COUNT(*) AS c FROM broadcasts WHERE status = 'completed'").get().c,
+    contacts: await count('SELECT COUNT(*) AS c FROM contacts'),
+    conversations_open: await count("SELECT COUNT(*) AS c FROM conversations WHERE status = 'open'"),
+    messages_in_24h: await count(`SELECT COUNT(*) AS c FROM messages WHERE direction = 'in' AND created_at > ${SQL.ago('1 day')}`),
+    messages_out_24h: await count(`SELECT COUNT(*) AS c FROM messages WHERE direction = 'out' AND sender_type != 'system' AND created_at > ${SQL.ago('1 day')}`),
+    ai_replies_24h: await count(`SELECT COUNT(*) AS c FROM messages WHERE sender_type = 'ai' AND created_at > ${SQL.ago('1 day')}`),
+    broadcasts_completed: await count("SELECT COUNT(*) AS c FROM broadcasts WHERE status = 'completed'"),
   };
-  const perAgent = db.prepare(`
+  const perAgent = await db.prepare(`
     SELECT u.name, COUNT(cv.id) AS open_chats
     FROM users u LEFT JOIN conversations cv ON cv.assigned_user_id = u.id AND cv.status = 'open'
-    WHERE u.is_active = 1 GROUP BY u.id ORDER BY u.id
+    WHERE u.is_active = 1 GROUP BY u.id, u.name ORDER BY u.id
   `).all();
-  const daily = db.prepare(`
-    SELECT date(created_at) AS day,
-           SUM(direction = 'in') AS inbound,
-           SUM(direction = 'out' AND sender_type != 'system') AS outbound
-    FROM messages WHERE created_at > datetime('now', '-14 day')
-    GROUP BY day ORDER BY day
+  const daily = await db.prepare(`
+    SELECT ${SQL.day('created_at')} AS day,
+           SUM(CASE WHEN direction = 'in' THEN 1 ELSE 0 END) AS inbound,
+           SUM(CASE WHEN direction = 'out' AND sender_type != 'system' THEN 1 ELSE 0 END) AS outbound
+    FROM messages WHERE created_at > ${SQL.ago('14 day')}
+    GROUP BY ${SQL.day('created_at')} ORDER BY day
   `).all();
   res.json({ counters, perAgent, daily });
 });
@@ -513,7 +519,7 @@ router.get('/analytics', (req, res) => {
 // ---------- Sandbox simulator ----------
 // Emulates a customer sending a WhatsApp message (sandbox mode only).
 router.post('/simulator/inbound', async (req, res) => {
-  if (!isSandbox()) return res.status(400).json({ error: 'Simulator is only available in sandbox mode' });
+  if (!(await isSandbox())) return res.status(400).json({ error: 'Simulator is only available in sandbox mode' });
   const { phone, name, text, media_url, media_type } = req.body || {};
   if (!phone || (!text && !media_url)) return res.status(400).json({ error: 'phone and text (or an attachment) are required' });
   const result = await handleInboundMessage({

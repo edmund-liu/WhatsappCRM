@@ -12,13 +12,13 @@ import { SERVERLESS } from '../runtime.js';
 
 const GRAPH_VERSION = 'v21.0';
 
-export function isSandbox() {
-  return getSetting('sandbox_mode', '1') === '1' || !getSetting('wa_access_token');
+export async function isSandbox() {
+  return (await getSetting('sandbox_mode', '1')) === '1' || !(await getSetting('wa_access_token'));
 }
 
 async function graphSend(payload) {
-  const token = getSetting('wa_access_token');
-  const phoneNumberId = getSetting('wa_phone_number_id');
+  const token = await getSetting('wa_access_token');
+  const phoneNumberId = await getSetting('wa_phone_number_id');
   if (!token || !phoneNumberId) throw new Error('WhatsApp Cloud API credentials not configured');
   const res = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${phoneNumberId}/messages`, {
     method: 'POST',
@@ -38,16 +38,17 @@ function fakeMessageId() {
 // status-update path the real webhook would. Serverless platforms freeze the
 // process after the response, so timers never fire there — apply immediately.
 function simulateReceipts(waMessageId) {
+  const apply = (status) => applyStatusUpdate(waMessageId, status).catch((err) => console.error('Receipt sim error:', err));
   if (SERVERLESS) {
-    setImmediate(() => { applyStatusUpdate(waMessageId, 'delivered'); applyStatusUpdate(waMessageId, 'read'); });
+    setImmediate(() => { apply('delivered'); setImmediate(() => apply('read')); });
     return;
   }
-  setTimeout(() => applyStatusUpdate(waMessageId, 'delivered'), 800 + Math.random() * 1200);
-  setTimeout(() => applyStatusUpdate(waMessageId, 'read'), 3000 + Math.random() * 4000);
+  setTimeout(() => apply('delivered'), 800 + Math.random() * 1200);
+  setTimeout(() => apply('read'), 3000 + Math.random() * 4000);
 }
 
 export async function sendText(toWaId, text) {
-  if (isSandbox()) {
+  if (await isSandbox()) {
     const id = fakeMessageId();
     simulateReceipts(id);
     return id;
@@ -64,7 +65,7 @@ export async function sendText(toWaId, text) {
 // Send an image or audio message. `link` must be a publicly reachable URL in
 // live mode (relative /uploads paths are resolved against the request host).
 export async function sendMedia(toWaId, { type, link, caption = '' }) {
-  if (isSandbox()) {
+  if (await isSandbox()) {
     const id = fakeMessageId();
     simulateReceipts(id);
     return id;
@@ -82,7 +83,7 @@ export async function sendMedia(toWaId, { type, link, caption = '' }) {
 
 // Live mode: resolve a Meta media ID to a local file in the uploads dir.
 export async function downloadMediaById(mediaId, uploadsDir) {
-  const token = getSetting('wa_access_token');
+  const token = await getSetting('wa_access_token');
   if (!token) throw new Error('No access token configured');
   const metaRes = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${mediaId}`, {
     headers: { Authorization: `Bearer ${token}` },
@@ -99,7 +100,7 @@ export async function downloadMediaById(mediaId, uploadsDir) {
 }
 
 export async function sendTemplate(toWaId, template, bodyParams, { headerImageUrl = null } = {}) {
-  if (isSandbox()) {
+  if (await isSandbox()) {
     const id = fakeMessageId();
     simulateReceipts(id);
     return id;
@@ -154,8 +155,8 @@ export function toMetaBody(body) {
 // WhatsApp marks everything up to the given message as read, so marking the
 // latest inbound message covers the whole conversation.
 export async function markConversationRead(conversationId) {
-  if (isSandbox()) return;
-  const last = db.prepare(
+  if (await isSandbox()) return;
+  const last = await db.prepare(
     "SELECT wa_message_id FROM messages WHERE conversation_id = ? AND direction = 'in' AND wa_message_id IS NOT NULL ORDER BY id DESC LIMIT 1"
   ).get(conversationId);
   if (!last) return;
@@ -164,22 +165,22 @@ export async function markConversationRead(conversationId) {
 
 // ---- Template sync with Meta (WhatsApp Business Management API) ----
 
-function wabaConfig() {
-  const token = getSetting('wa_access_token');
-  const wabaId = getSetting('wa_waba_id');
+async function wabaConfig() {
+  const token = await getSetting('wa_access_token');
+  const wabaId = await getSetting('wa_waba_id');
   if (!token || !wabaId) throw new Error('Configure the access token and WhatsApp Business Account (WABA) ID in Settings first');
   return { token, wabaId };
 }
 
 // Pull the WABA's template library into the local table (upsert by name).
 export async function pullTemplatesFromMeta() {
-  const { token, wabaId } = wabaConfig();
+  const { token, wabaId } = await wabaConfig();
   const upsert = db.prepare(`
     INSERT INTO templates (name, language, category, body, status, param_map, meta_id, header_image_url, buttons)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(name) DO UPDATE SET language = excluded.language, category = excluded.category,
       body = excluded.body, status = excluded.status, param_map = excluded.param_map, meta_id = excluded.meta_id,
-      header_image_url = COALESCE(excluded.header_image_url, header_image_url), buttons = excluded.buttons
+      header_image_url = COALESCE(excluded.header_image_url, templates.header_image_url), buttons = excluded.buttons
   `);
   let url = `https://graph.facebook.com/${GRAPH_VERSION}/${wabaId}/message_templates?fields=name,status,category,language,components&limit=100`;
   let count = 0;
@@ -200,7 +201,7 @@ export async function pullTemplatesFromMeta() {
       const buttons = (buttonsComp?.buttons || [])
         .filter((b) => ['QUICK_REPLY', 'URL'].includes(b.type))
         .map((b) => ({ type: b.type, text: b.text, ...(b.type === 'URL' ? { url: b.url } : {}) }));
-      upsert.run(t.name, t.language || 'en', category, bodyComp.text, t.status || 'APPROVED',
+      await upsert.run(t.name, t.language || 'en', category, bodyComp.text, t.status || 'APPROVED',
         JSON.stringify(computeParamMap(bodyComp.text)), t.id || null, headerUrl, JSON.stringify(buttons));
       count++;
     }
@@ -213,7 +214,7 @@ export async function pullTemplatesFromMeta() {
 // its {{name}} token; Meta receives the positional version, and param_map
 // bridges the two at send time.
 export async function pushTemplateToMeta(template) {
-  const { token, wabaId } = wabaConfig();
+  const { token, wabaId } = await wabaConfig();
   const metaBody = toMetaBody(template.body);
   const map = computeParamMap(template.body);
   const components = [];
@@ -250,22 +251,22 @@ export async function pushTemplateToMeta(template) {
   });
   const json = await res.json();
   if (!res.ok) throw new Error(json.error?.error_user_msg || json.error?.message || `Template submission failed (${res.status})`);
-  db.prepare('UPDATE templates SET status = ?, meta_id = ? WHERE id = ?')
+  await db.prepare('UPDATE templates SET status = ?, meta_id = ? WHERE id = ?')
     .run(json.status || 'PENDING', json.id || null, template.id);
   return json;
 }
 
 // Shared by the live webhook and the sandbox receipt simulator.
-export function applyStatusUpdate(waMessageId, status, error = null) {
+export async function applyStatusUpdate(waMessageId, status, error = null) {
   const rank = { queued: 0, sent: 1, delivered: 2, read: 3, failed: 4 };
-  const msg = db.prepare('SELECT id, conversation_id, status FROM messages WHERE wa_message_id = ?').get(waMessageId);
+  const msg = await db.prepare('SELECT id, conversation_id, status FROM messages WHERE wa_message_id = ?').get(waMessageId);
   if (msg && (rank[status] ?? 0) > (rank[msg.status] ?? 0)) {
-    db.prepare('UPDATE messages SET status = ?, error = COALESCE(?, error) WHERE id = ?').run(status, error, msg.id);
+    await db.prepare('UPDATE messages SET status = ?, error = COALESCE(?, error) WHERE id = ?').run(status, error, msg.id);
     emit('message_status', { message_id: msg.id, conversation_id: msg.conversation_id, status });
   }
-  const recip = db.prepare('SELECT id, broadcast_id, status FROM broadcast_recipients WHERE wa_message_id = ?').get(waMessageId);
+  const recip = await db.prepare('SELECT id, broadcast_id, status FROM broadcast_recipients WHERE wa_message_id = ?').get(waMessageId);
   if (recip && (rank[status] ?? 0) > (rank[recip.status] ?? 0)) {
-    db.prepare('UPDATE broadcast_recipients SET status = ?, error = COALESCE(?, error) WHERE id = ?').run(status, error, recip.id);
+    await db.prepare('UPDATE broadcast_recipients SET status = ?, error = COALESCE(?, error) WHERE id = ?').run(status, error, recip.id);
     emit('broadcast_progress', { broadcast_id: recip.broadcast_id });
   }
 }

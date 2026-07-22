@@ -10,11 +10,11 @@ import { applyStatusUpdate, downloadMediaById } from '../services/whatsapp.js';
 
 const router = Router();
 
-router.get('/whatsapp', (req, res) => {
+router.get('/whatsapp', async (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
-  if (mode === 'subscribe' && token && token === getSetting('wa_verify_token')) {
+  if (mode === 'subscribe' && token && token === (await getSetting('wa_verify_token'))) {
     return res.status(200).send(challenge);
   }
   res.sendStatus(403);
@@ -33,11 +33,12 @@ router.post('/whatsapp', async (req, res) => {
         // Meta approved/rejected/paused a template -> sync status locally.
         if (change.field === 'message_template_status_update') {
           if (value.message_template_name && value.event) {
-            db.prepare('UPDATE templates SET status = ? WHERE name = ?')
+            await db.prepare('UPDATE templates SET status = ? WHERE name = ?')
               .run(value.event, value.message_template_name);
           }
           continue;
         }
+
         const contactNames = {};
         for (const c of value.contacts || []) contactNames[c.wa_id] = c.profile?.name;
 
@@ -76,7 +77,7 @@ router.post('/whatsapp', async (req, res) => {
           const error = status.errors?.[0]
             ? `${status.errors[0].title || ''} ${status.errors[0].error_data?.details || ''}`.trim()
             : null;
-          applyStatusUpdate(status.id, status.status, error);
+          await applyStatusUpdate(status.id, status.status, error);
         }
       }
     }

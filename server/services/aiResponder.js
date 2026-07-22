@@ -16,8 +16,8 @@ import { roundRobinAssign, addSystemNote } from './assignment.js';
 // Pick the AI agent for a new conversation: prefer one whose skills match the
 // detected topic, then a generalist (no skills listed), then any auto-assign
 // agent.
-export function pickAutoAssignAgent(skill = null) {
-  const agents = db.prepare('SELECT * FROM ai_agents WHERE is_active = 1 AND auto_assign_new = 1 ORDER BY id').all();
+export async function pickAutoAssignAgent(skill = null) {
+  const agents = await db.prepare('SELECT * FROM ai_agents WHERE is_active = 1 AND auto_assign_new = 1 ORDER BY id').all();
   if (agents.length === 0) return null;
   const skillsOf = (a) => { try { return JSON.parse(a.skills || '[]'); } catch { return []; } };
   if (skill) {
@@ -35,7 +35,7 @@ function wantsHuman(text, agent) {
 }
 
 async function claudeReply(agent, history, contactName) {
-  const apiKey = getSetting('anthropic_api_key') || process.env.ANTHROPIC_API_KEY;
+  const apiKey = (await getSetting('anthropic_api_key')) || process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return null;
   const messages = history.map((m) => ({
     role: m.direction === 'in' ? 'user' : 'assistant',
@@ -87,11 +87,11 @@ function ruleReply(text) {
 // context without re-reading the whole thread. Uses Claude when a key is
 // configured; otherwise builds a compact digest from the transcript.
 async function buildHandoffSummary(conversation, agent) {
-  const msgs = db.prepare(
+  const msgs = await db.prepare(
     "SELECT sender_type, body FROM messages WHERE conversation_id = ? AND sender_type IN ('contact','ai','agent') ORDER BY id"
   ).all(conversation.id);
-  const contact = db.prepare('SELECT name FROM contacts WHERE id = ?').get(conversation.contact_id);
-  const apiKey = getSetting('anthropic_api_key') || process.env.ANTHROPIC_API_KEY;
+  const contact = await db.prepare('SELECT name FROM contacts WHERE id = ?').get(conversation.contact_id);
+  const apiKey = (await getSetting('anthropic_api_key')) || process.env.ANTHROPIC_API_KEY;
   if (apiKey && msgs.length) {
     try {
       const transcript = msgs.map((m) => `${m.sender_type === 'contact' ? 'Customer' : 'Assistant'}: ${m.body || '[media]'}`)
@@ -126,12 +126,12 @@ async function buildHandoffSummary(conversation, agent) {
 }
 
 async function handoffToHuman(conversation, agent, reason) {
-  db.prepare('UPDATE conversations SET ai_enabled = 0 WHERE id = ?').run(conversation.id);
-  addSystemNote(conversation.id, `🤖 ${agent.name} handed off to a human (${reason})`);
+  await db.prepare('UPDATE conversations SET ai_enabled = 0 WHERE id = ?').run(conversation.id);
+  await addSystemNote(conversation.id, `🤖 ${agent.name} handed off to a human (${reason})`);
   const summary = await buildHandoffSummary(conversation, agent);
-  addSystemNote(conversation.id, `📋 Handoff summary — ${summary}`);
+  await addSystemNote(conversation.id, `📋 Handoff summary — ${summary}`);
   if (!conversation.assigned_user_id) {
-    const human = roundRobinAssign(conversation.id, conversation.required_skill);
+    const human = await roundRobinAssign(conversation.id, conversation.required_skill);
     const note = human
       ? `You're being connected to ${human.name} from our team. They'll be with you shortly! 🙋`
       : "You're in the queue for our team — someone will be with you as soon as possible!";
@@ -141,20 +141,20 @@ async function handoffToHuman(conversation, agent, reason) {
 }
 
 async function sendAiText(conversation, agent, text) {
-  const contact = db.prepare('SELECT * FROM contacts WHERE id = ?').get(conversation.contact_id);
+  const contact = await db.prepare('SELECT * FROM contacts WHERE id = ?').get(conversation.contact_id);
   const waMessageId = await sendText(contact.wa_id, text);
-  db.prepare(
+  await db.prepare(
     "INSERT INTO messages (conversation_id, direction, sender_type, ai_agent_id, type, body, wa_message_id, status) VALUES (?, 'out', 'ai', ?, 'text', ?, ?, 'sent')"
   ).run(conversation.id, agent.id, text, waMessageId);
-  db.prepare('UPDATE conversations SET last_message_at = datetime(\'now\'), last_message_preview = ? WHERE id = ?')
+  await db.prepare('UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP, last_message_preview = ? WHERE id = ?')
     .run(`🤖 ${text}`.slice(0, 120), conversation.id);
   emit('message_created', { conversation_id: conversation.id });
 }
 
 export async function maybeAutoReply(conversationId, inboundText) {
-  const conversation = db.prepare('SELECT * FROM conversations WHERE id = ?').get(conversationId);
+  const conversation = await db.prepare('SELECT * FROM conversations WHERE id = ?').get(conversationId);
   if (!conversation || !conversation.ai_enabled || !conversation.ai_agent_id) return;
-  const agent = db.prepare('SELECT * FROM ai_agents WHERE id = ? AND is_active = 1').get(conversation.ai_agent_id);
+  const agent = await db.prepare('SELECT * FROM ai_agents WHERE id = ? AND is_active = 1').get(conversation.ai_agent_id);
   if (!agent) return;
 
   if (wantsHuman(inboundText, agent)) {
@@ -162,10 +162,10 @@ export async function maybeAutoReply(conversationId, inboundText) {
     return;
   }
 
-  const contact = db.prepare('SELECT * FROM contacts WHERE id = ?').get(conversation.contact_id);
-  const history = db.prepare(
+  const contact = await db.prepare('SELECT * FROM contacts WHERE id = ?').get(conversation.contact_id);
+  const history = (await db.prepare(
     "SELECT direction, body FROM messages WHERE conversation_id = ? AND sender_type IN ('contact','agent','ai') ORDER BY id DESC LIMIT 20"
-  ).all(conversationId).reverse();
+  ).all(conversationId)).reverse();
 
   let reply;
   try {

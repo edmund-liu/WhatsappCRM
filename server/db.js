@@ -1,72 +1,146 @@
-// Uses Node's built-in SQLite (node:sqlite, Node >= 22.5) — no native
-// compilation, so `npm install && npm start` works on any platform.
+// Database layer with two interchangeable backends behind one async API:
+//
+//  - Built-in SQLite (node:sqlite, Node >= 22.5): zero-setup default for
+//    local/always-on hosting. File lives in the data dir.
+//  - Postgres: used automatically when DATABASE_URL (or POSTGRES_URL) is set.
+//    This is the right choice on serverless hosts like Vercel, where local
+//    disk is ephemeral and per-instance — a shared Postgres (Neon, Supabase,
+//    Vercel Postgres) makes data persistent and consistent across instances.
+//
+// The API mirrors better-sqlite3 ergonomics but async:
+//   await db.prepare(sql).get(...args) / .all(...args) / .run(...args)
+//   await db.exec(sql)
+// SQL is written in SQLite dialect with '?' placeholders; the Postgres
+// backend translates placeholders and returns INSERT ids via RETURNING.
 import bcrypt from 'bcryptjs';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 
-let DatabaseSync;
-try {
-  ({ DatabaseSync } = await import('node:sqlite'));
-} catch {
-  console.error('\nThis app needs Node.js 22.5 or newer (built-in SQLite support).');
-  console.error(`You are running Node ${process.version}. Please upgrade: https://nodejs.org\n`);
-  process.exit(1);
-}
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// On serverless platforms (Vercel) only /tmp is writable — data is ephemeral
-// there and reseeds on cold start; use a persistent host for real deployments.
 const DATA_DIR = process.env.DATA_DIR
   || (process.env.VERCEL ? '/tmp/whatsappcrm-data' : path.join(__dirname, '..', 'data'));
+fs.mkdirSync(DATA_DIR, { recursive: true });
 export const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 fs.mkdirSync(UPLOADS_DIR, { recursive: true });
-fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const db = new DatabaseSync(path.join(DATA_DIR, 'crm.sqlite'));
-db.exec('PRAGMA journal_mode = WAL');
-db.exec('PRAGMA foreign_keys = ON');
+const PG_URL = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.POSTGRES_PRISMA_URL;
+export const DIALECT = PG_URL ? 'pg' : 'sqlite';
 
-db.exec(`
+let db;
+
+if (DIALECT === 'pg') {
+  const { default: pg } = await import('pg');
+  // COUNT()/SUM() come back as strings by default — parse them.
+  pg.types.setTypeParser(20, (v) => parseInt(v, 10));       // int8
+  pg.types.setTypeParser(1700, (v) => parseFloat(v));       // numeric
+  const pool = new pg.Pool({
+    connectionString: PG_URL,
+    max: process.env.VERCEL ? 3 : 10,
+    ssl: /localhost|127\.0\.0\.1/.test(PG_URL) ? false : { rejectUnauthorized: false },
+  });
+  const toPg = (sql) => {
+    let n = 0;
+    return sql.replace(/\?/g, () => `$${++n}`);
+  };
+  db = {
+    prepare(sql) {
+      const pgSql = toPg(sql);
+      return {
+        async get(...args) { return (await pool.query(pgSql, args)).rows[0]; },
+        async all(...args) { return (await pool.query(pgSql, args)).rows; },
+        async run(...args) {
+          let q = pgSql;
+          if (/^\s*insert/i.test(q) && !/returning/i.test(q)) q += ' RETURNING *';
+          const r = await pool.query(q, args);
+          return { changes: r.rowCount, lastInsertRowid: r.rows?.[0]?.id ?? null };
+        },
+      };
+    },
+    async exec(sql) { await pool.query(sql); },
+  };
+} else {
+  let DatabaseSync;
+  try {
+    ({ DatabaseSync } = await import('node:sqlite'));
+  } catch {
+    console.error('\nThis app needs Node.js 22.5 or newer (built-in SQLite support).');
+    console.error(`You are running Node ${process.version}. Please upgrade: https://nodejs.org\n`);
+    process.exit(1);
+  }
+  const sqlite = new DatabaseSync(path.join(DATA_DIR, 'crm.sqlite'));
+  sqlite.exec('PRAGMA journal_mode = WAL');
+  sqlite.exec('PRAGMA foreign_keys = ON');
+  db = {
+    prepare(sql) {
+      return {
+        async get(...args) { return sqlite.prepare(sql).get(...args); },
+        async all(...args) { return sqlite.prepare(sql).all(...args); },
+        async run(...args) { return sqlite.prepare(sql).run(...args); },
+      };
+    },
+    async exec(sql) { sqlite.exec(sql); },
+    _sqlite: sqlite,
+  };
+}
+
+// Dialect helpers for the few queries that can't be written portably.
+export const SQL = {
+  // timestamp N units ago, e.g. ago('1 day')
+  ago: (interval) => DIALECT === 'pg'
+    ? `NOW() - INTERVAL '${interval}'`
+    : `datetime('now', '-${interval}')`,
+  // YYYY-MM-DD day bucket for a timestamp column
+  day: (col) => DIALECT === 'pg' ? `TO_CHAR(${col}::date, 'YYYY-MM-DD')` : `date(${col})`,
+};
+
+// ---------- Schema ----------
+const ID_PK = DIALECT === 'pg' ? 'INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY' : 'INTEGER PRIMARY KEY AUTOINCREMENT';
+const NOW_DEFAULT = DIALECT === 'pg' ? 'TIMESTAMPTZ NOT NULL DEFAULT NOW()' : "TEXT NOT NULL DEFAULT (datetime('now'))";
+const TS = DIALECT === 'pg' ? 'TIMESTAMPTZ' : 'TEXT';
+
+await db.exec(`
 CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id ${ID_PK},
   name TEXT NOT NULL,
   email TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'agent' CHECK (role IN ('admin','agent')),
   is_active INTEGER NOT NULL DEFAULT 1,
   available INTEGER NOT NULL DEFAULT 1,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  skills TEXT NOT NULL DEFAULT '[]',
+  created_at ${NOW_DEFAULT}
 );
 
 CREATE TABLE IF NOT EXISTS contacts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  wa_id TEXT NOT NULL UNIQUE,           -- WhatsApp phone number (E.164, digits only)
+  id ${ID_PK},
+  wa_id TEXT NOT NULL UNIQUE,
   name TEXT,
-  tags TEXT NOT NULL DEFAULT '[]',      -- JSON array of strings
-  attributes TEXT NOT NULL DEFAULT '{}',-- JSON object of custom fields
+  tags TEXT NOT NULL DEFAULT '[]',
+  attributes TEXT NOT NULL DEFAULT '{}',
   opted_out INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  last_message_at TEXT
+  created_at ${NOW_DEFAULT},
+  last_message_at ${TS}
 );
 
 CREATE TABLE IF NOT EXISTS conversations (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id ${ID_PK},
   contact_id INTEGER NOT NULL REFERENCES contacts(id),
   status TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','pending','resolved')),
   assigned_user_id INTEGER REFERENCES users(id),
   ai_agent_id INTEGER,
   ai_enabled INTEGER NOT NULL DEFAULT 0,
+  required_skill TEXT,
   unread_count INTEGER NOT NULL DEFAULT 0,
-  last_message_at TEXT,
+  last_message_at ${TS},
   last_message_preview TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at ${NOW_DEFAULT}
 );
 CREATE INDEX IF NOT EXISTS idx_conv_contact ON conversations(contact_id);
 CREATE INDEX IF NOT EXISTS idx_conv_assigned ON conversations(assigned_user_id);
 
 CREATE TABLE IF NOT EXISTS messages (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id ${ID_PK},
   conversation_id INTEGER NOT NULL REFERENCES conversations(id),
   direction TEXT NOT NULL CHECK (direction IN ('in','out')),
   sender_type TEXT NOT NULL CHECK (sender_type IN ('contact','agent','ai','broadcast','system')),
@@ -77,63 +151,71 @@ CREATE TABLE IF NOT EXISTS messages (
   wa_message_id TEXT,
   status TEXT NOT NULL DEFAULT 'sent' CHECK (status IN ('queued','sent','delivered','read','failed','received')),
   error TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  media_url TEXT,
+  buttons TEXT NOT NULL DEFAULT '[]',
+  created_at ${NOW_DEFAULT}
 );
 CREATE INDEX IF NOT EXISTS idx_msg_conv ON messages(conversation_id);
 CREATE INDEX IF NOT EXISTS idx_msg_waid ON messages(wa_message_id);
 
 CREATE TABLE IF NOT EXISTS templates (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id ${ID_PK},
   name TEXT NOT NULL UNIQUE,
   language TEXT NOT NULL DEFAULT 'en',
   category TEXT NOT NULL DEFAULT 'MARKETING' CHECK (category IN ('MARKETING','UTILITY','AUTHENTICATION')),
-  body TEXT NOT NULL,                   -- text with {{1}}, {{2}} placeholders
+  body TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'APPROVED',
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  param_map TEXT NOT NULL DEFAULT '[]',
+  meta_id TEXT,
+  header_image_url TEXT,
+  buttons TEXT NOT NULL DEFAULT '[]',
+  created_at ${NOW_DEFAULT}
 );
 
 CREATE TABLE IF NOT EXISTS broadcasts (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id ${ID_PK},
   name TEXT NOT NULL,
   template_id INTEGER NOT NULL REFERENCES templates(id),
-  variables TEXT NOT NULL DEFAULT '[]', -- JSON array; supports {{name}} token per-contact
-  audience_tag TEXT,                    -- null = all contacts
+  variables TEXT NOT NULL DEFAULT '[]',
+  audience_tag TEXT,
   status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft','scheduled','sending','completed','cancelled')),
-  scheduled_at TEXT,
-  started_at TEXT,
-  completed_at TEXT,
+  scheduled_at ${TS},
+  started_at ${TS},
+  completed_at ${TS},
   created_by INTEGER REFERENCES users(id),
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  header_image_url TEXT,
+  created_at ${NOW_DEFAULT}
 );
 
 CREATE TABLE IF NOT EXISTS broadcast_recipients (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id ${ID_PK},
   broadcast_id INTEGER NOT NULL REFERENCES broadcasts(id),
   contact_id INTEGER NOT NULL REFERENCES contacts(id),
   status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued','sent','delivered','read','failed')),
   wa_message_id TEXT,
   error TEXT,
-  sent_at TEXT
+  sent_at ${TS}
 );
 CREATE INDEX IF NOT EXISTS idx_br_bcast ON broadcast_recipients(broadcast_id);
 CREATE INDEX IF NOT EXISTS idx_br_waid ON broadcast_recipients(wa_message_id);
 
 CREATE TABLE IF NOT EXISTS ai_agents (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id ${ID_PK},
   name TEXT NOT NULL,
   system_prompt TEXT NOT NULL,
   model TEXT NOT NULL DEFAULT 'claude-haiku-4-5-20251001',
   is_active INTEGER NOT NULL DEFAULT 1,
-  auto_assign_new INTEGER NOT NULL DEFAULT 1, -- pick up brand-new conversations automatically
+  auto_assign_new INTEGER NOT NULL DEFAULT 1,
   handoff_keywords TEXT NOT NULL DEFAULT '["human","agent","representative","person"]',
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  skills TEXT NOT NULL DEFAULT '[]',
+  created_at ${NOW_DEFAULT}
 );
 
 CREATE TABLE IF NOT EXISTS skills (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id ${ID_PK},
   name TEXT NOT NULL UNIQUE,
-  keywords TEXT NOT NULL DEFAULT '[]',  -- JSON array; inbound text matching these routes to this skill
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  keywords TEXT NOT NULL DEFAULT '[]',
+  created_at ${NOW_DEFAULT}
 );
 
 CREATE TABLE IF NOT EXISTS settings (
@@ -142,25 +224,23 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 `);
 
-// ---- Migrations for databases created before skill-based routing ----
-const addColumnIfMissing = (table, column, ddl) => {
-  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
-  if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
-};
-addColumnIfMissing('users', 'skills', "skills TEXT NOT NULL DEFAULT '[]'");
-addColumnIfMissing('ai_agents', 'skills', "skills TEXT NOT NULL DEFAULT '[]'");
-addColumnIfMissing('conversations', 'required_skill', 'required_skill TEXT');
-// Rich broadcast content: image headers, quick-reply and URL buttons.
-addColumnIfMissing('templates', 'header_image_url', 'header_image_url TEXT');
-addColumnIfMissing('templates', 'buttons', "buttons TEXT NOT NULL DEFAULT '[]'");
-addColumnIfMissing('broadcasts', 'header_image_url', 'header_image_url TEXT');
-addColumnIfMissing('messages', 'media_url', 'media_url TEXT');
-addColumnIfMissing('messages', 'buttons', "buttons TEXT NOT NULL DEFAULT '[]'");
-
-// ---- Migrations for databases created before template<->Meta sync ----
-const templateCols = db.prepare('PRAGMA table_info(templates)').all().map((c) => c.name);
-if (!templateCols.includes('param_map')) db.exec("ALTER TABLE templates ADD COLUMN param_map TEXT NOT NULL DEFAULT '[]'");
-if (!templateCols.includes('meta_id')) db.exec('ALTER TABLE templates ADD COLUMN meta_id TEXT');
+// ---------- SQLite-only migrations (Postgres schemas are created complete) ----------
+if (DIALECT === 'sqlite') {
+  const addColumnIfMissing = (table, column, ddl) => {
+    const cols = db._sqlite.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+    if (!cols.includes(column)) db._sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  };
+  addColumnIfMissing('users', 'skills', "skills TEXT NOT NULL DEFAULT '[]'");
+  addColumnIfMissing('ai_agents', 'skills', "skills TEXT NOT NULL DEFAULT '[]'");
+  addColumnIfMissing('conversations', 'required_skill', 'required_skill TEXT');
+  addColumnIfMissing('templates', 'param_map', "param_map TEXT NOT NULL DEFAULT '[]'");
+  addColumnIfMissing('templates', 'meta_id', 'meta_id TEXT');
+  addColumnIfMissing('templates', 'header_image_url', 'header_image_url TEXT');
+  addColumnIfMissing('templates', 'buttons', "buttons TEXT NOT NULL DEFAULT '[]'");
+  addColumnIfMissing('broadcasts', 'header_image_url', 'header_image_url TEXT');
+  addColumnIfMissing('messages', 'media_url', 'media_url TEXT');
+  addColumnIfMissing('messages', 'buttons', "buttons TEXT NOT NULL DEFAULT '[]'");
+}
 
 // Ordered list of placeholder tokens in a template body, e.g.
 // "Hi {{name}}, order {{1}} ships {{2}}" -> ["name","1","2"]. Meta templates
@@ -170,39 +250,39 @@ export function computeParamMap(body) {
   return [...String(body).matchAll(/\{\{(name|\d+)\}\}/g)].map((m) => m[1]);
 }
 
-// Keep param_map in sync with bodies (covers seeds and older rows).
-for (const t of db.prepare('SELECT id, body, param_map FROM templates').all()) {
-  const map = JSON.stringify(computeParamMap(t.body));
-  if (map !== t.param_map) db.prepare('UPDATE templates SET param_map = ? WHERE id = ?').run(map, t.id);
-}
-
-export function getSetting(key, fallback = null) {
-  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+export async function getSetting(key, fallback = null) {
+  const row = await db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
   return row ? row.value : fallback;
 }
 
-export function setSetting(key, value) {
-  db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+export async function setSetting(key, value) {
+  await db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
     .run(key, value == null ? null : String(value));
 }
 
-// ---- Seed data (first run only) ----
-const userCount = db.prepare('SELECT COUNT(*) AS c FROM users').get().c;
+// Keep param_map in sync with bodies (covers seeds and older rows).
+for (const t of await db.prepare('SELECT id, body, param_map FROM templates').all()) {
+  const map = JSON.stringify(computeParamMap(t.body));
+  if (map !== t.param_map) await db.prepare('UPDATE templates SET param_map = ? WHERE id = ?').run(map, t.id);
+}
+
+// ---------- Seed data (first run only) ----------
+const userCount = (await db.prepare('SELECT COUNT(*) AS c FROM users').get()).c;
 if (userCount === 0) {
   const hash = (p) => bcrypt.hashSync(p, 10);
   const insertUser = db.prepare('INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)');
-  insertUser.run('Admin', 'admin@example.com', hash('admin123'), 'admin');
-  insertUser.run('Ava Agent', 'ava@example.com', hash('agent123'), 'agent');
-  insertUser.run('Ben Agent', 'ben@example.com', hash('agent123'), 'agent');
+  await insertUser.run('Admin', 'admin@example.com', hash('admin123'), 'admin');
+  await insertUser.run('Ava Agent', 'ava@example.com', hash('agent123'), 'agent');
+  await insertUser.run('Ben Agent', 'ben@example.com', hash('agent123'), 'agent');
 
   const insertTemplate = db.prepare('INSERT INTO templates (name, language, category, body) VALUES (?, ?, ?, ?)');
-  insertTemplate.run('welcome_offer', 'en', 'MARKETING',
+  await insertTemplate.run('welcome_offer', 'en', 'MARKETING',
     'Hi {{name}}! 🎉 Welcome to our store. Use code WELCOME10 for 10% off your first order.');
-  insertTemplate.run('order_update', 'en', 'UTILITY',
+  await insertTemplate.run('order_update', 'en', 'UTILITY',
     'Hi {{name}}, your order {{1}} has been shipped and will arrive by {{2}}.');
-  insertTemplate.run('payment_reminder', 'en', 'UTILITY',
+  await insertTemplate.run('payment_reminder', 'en', 'UTILITY',
     'Hi {{name}}, this is a friendly reminder that your invoice {{1}} is due on {{2}}.');
-  db.prepare('INSERT INTO templates (name, language, category, body, header_image_url, buttons) VALUES (?, ?, ?, ?, ?, ?)').run(
+  await db.prepare('INSERT INTO templates (name, language, category, body, header_image_url, buttons) VALUES (?, ?, ?, ?, ?, ?)').run(
     'summer_sale', 'en', 'MARKETING',
     'Hi {{name}}! ☀️ Our summer sale is on — up to {{1}} off everything this week only.',
     'https://images.unsplash.com/photo-1441986300917-64674bd600d8?w=800&q=60',
@@ -212,29 +292,28 @@ if (userCount === 0) {
       { type: 'QUICK_REPLY', text: 'Unsubscribe' },
     ]));
 
-  db.prepare(`INSERT INTO ai_agents (name, system_prompt) VALUES (?, ?)`).run(
+  await db.prepare('INSERT INTO ai_agents (name, system_prompt) VALUES (?, ?)').run(
     'Support Bot',
     'You are a friendly customer support assistant for an online store. Answer questions about orders, shipping (3-5 business days, free over $50), returns (30-day policy), and products. Keep replies short and suitable for WhatsApp. If you cannot help or the customer is upset, tell them you will connect them to a human teammate.'
   );
 
-  setSetting('round_robin_cursor', '0');
-  setSetting('sandbox_mode', '1');
+  await setSetting('round_robin_cursor', '0');
+  await setSetting('sandbox_mode', '1');
 }
 
 // Seed routing skills once (also backfills databases created before
 // skill-based routing existed).
-if (!getSetting('skills_seeded')) {
-  if (db.prepare('SELECT COUNT(*) AS c FROM skills').get().c === 0) {
+if (!(await getSetting('skills_seeded'))) {
+  if ((await db.prepare('SELECT COUNT(*) AS c FROM skills').get()).c === 0) {
     const insertSkill = db.prepare('INSERT INTO skills (name, keywords) VALUES (?, ?)');
-    insertSkill.run('billing', JSON.stringify(['invoice', 'payment', 'refund', 'charge', 'billing', 'charged', 'subscription']));
-    insertSkill.run('shipping', JSON.stringify(['shipping', 'delivery', 'deliver', 'track', 'shipment', 'order status', 'where is my order', 'arrived']));
-    insertSkill.run('technical', JSON.stringify(['error', 'bug', 'not working', 'broken', 'crash', 'install', 'login problem', "doesn't work"]));
-    insertSkill.run('sales', JSON.stringify(['price', 'pricing', 'buy', 'purchase', 'discount', 'quote', 'demo', 'upgrade']));
-    // Give the demo agents complementary skill sets so routing is visible.
-    db.prepare("UPDATE users SET skills = ? WHERE email = 'ava@example.com'").run(JSON.stringify(['billing', 'sales']));
-    db.prepare("UPDATE users SET skills = ? WHERE email = 'ben@example.com'").run(JSON.stringify(['shipping', 'technical']));
+    await insertSkill.run('billing', JSON.stringify(['invoice', 'payment', 'refund', 'charge', 'billing', 'charged', 'subscription']));
+    await insertSkill.run('shipping', JSON.stringify(['shipping', 'delivery', 'deliver', 'track', 'shipment', 'order status', 'where is my order', 'arrived']));
+    await insertSkill.run('technical', JSON.stringify(['error', 'bug', 'not working', 'broken', 'crash', 'install', 'login problem', "doesn't work"]));
+    await insertSkill.run('sales', JSON.stringify(['price', 'pricing', 'buy', 'purchase', 'discount', 'quote', 'demo', 'upgrade']));
+    await db.prepare("UPDATE users SET skills = ? WHERE email = 'ava@example.com'").run(JSON.stringify(['billing', 'sales']));
+    await db.prepare("UPDATE users SET skills = ? WHERE email = 'ben@example.com'").run(JSON.stringify(['shipping', 'technical']));
   }
-  setSetting('skills_seeded', '1');
+  await setSetting('skills_seeded', '1');
 }
 
 export default db;

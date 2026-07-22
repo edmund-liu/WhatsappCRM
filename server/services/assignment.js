@@ -12,11 +12,11 @@ import { emit } from './events.js';
 const parseSkills = (json) => { try { return JSON.parse(json || '[]'); } catch { return []; } };
 
 // Classify a message: the skill with the most keyword hits, or null.
-export function detectSkill(text) {
+export async function detectSkill(text) {
   const lower = String(text).toLowerCase();
   let best = null;
   let bestHits = 0;
-  for (const skill of db.prepare('SELECT name, keywords FROM skills').all()) {
+  for (const skill of await db.prepare('SELECT name, keywords FROM skills').all()) {
     const hits = parseSkills(skill.keywords)
       .filter((k) => k && lower.includes(String(k).toLowerCase())).length;
     if (hits > bestHits) { best = skill.name; bestHits = hits; }
@@ -24,8 +24,8 @@ export function detectSkill(text) {
   return best;
 }
 
-export function nextAgent(skill = null) {
-  let agents = db.prepare(
+export async function nextAgent(skill = null) {
+  let agents = await db.prepare(
     'SELECT id, name, skills FROM users WHERE is_active = 1 AND available = 1 ORDER BY id'
   ).all();
   let poolKey = 'general';
@@ -35,30 +35,30 @@ export function nextAgent(skill = null) {
   }
   if (agents.length === 0) return null;
   const cursorKey = 'round_robin_cursor:' + poolKey;
-  const cursor = parseInt(getSetting(cursorKey, '0'), 10) || 0;
+  const cursor = parseInt(await getSetting(cursorKey, '0'), 10) || 0;
   const agent = agents[cursor % agents.length];
-  setSetting(cursorKey, String((cursor + 1) % agents.length));
+  await setSetting(cursorKey, String((cursor + 1) % agents.length));
   return { ...agent, poolKey };
 }
 
-export function assignConversation(conversationId, userId, { by = 'round-robin' } = {}) {
-  db.prepare('UPDATE conversations SET assigned_user_id = ? WHERE id = ?').run(userId, conversationId);
-  const user = userId ? db.prepare('SELECT name FROM users WHERE id = ?').get(userId) : null;
-  addSystemNote(conversationId, user ? `Assigned to ${user.name} (${by})` : 'Unassigned');
+export async function assignConversation(conversationId, userId, { by = 'round-robin' } = {}) {
+  await db.prepare('UPDATE conversations SET assigned_user_id = ? WHERE id = ?').run(userId, conversationId);
+  const user = userId ? await db.prepare('SELECT name FROM users WHERE id = ?').get(userId) : null;
+  await addSystemNote(conversationId, user ? `Assigned to ${user.name} (${by})` : 'Unassigned');
   emit('conversation_updated', { conversation_id: conversationId });
   return user;
 }
 
-export function roundRobinAssign(conversationId, skill = null) {
-  const agent = nextAgent(skill);
+export async function roundRobinAssign(conversationId, skill = null) {
+  const agent = await nextAgent(skill);
   if (!agent) return null;
   const by = agent.poolKey === 'general' ? 'round-robin' : `round-robin · ${agent.poolKey} skill`;
-  assignConversation(conversationId, agent.id, { by });
+  await assignConversation(conversationId, agent.id, { by });
   return agent;
 }
 
-export function addSystemNote(conversationId, text) {
-  db.prepare(
+export async function addSystemNote(conversationId, text) {
+  await db.prepare(
     "INSERT INTO messages (conversation_id, direction, sender_type, type, body, status) VALUES (?, 'out', 'system', 'system', ?, 'sent')"
   ).run(conversationId, text);
   emit('message_created', { conversation_id: conversationId });

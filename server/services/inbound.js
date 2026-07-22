@@ -3,11 +3,10 @@
 //
 // For each customer message: upsert the contact, find/reopen a conversation,
 // store the message, then route it:
-//   1. Brand-new conversation + an active auto-assign AI agent -> AI picks it
-//      up and auto-replies (round-robin to humans happens on handoff).
-//   2. Otherwise a new conversation is round-robin assigned to the next
-//      available staff member.
-//   3. Existing conversations keep their owner; AI keeps replying if enabled.
+//   1. Brand-new conversation: classify the topic against routing skills,
+//      then prefer an AI agent whose skills match; otherwise round-robin to
+//      the matching staff pool (general pool as fallback).
+//   2. Existing conversations keep their owner; AI keeps replying if enabled.
 import db from '../db.js';
 import { emit } from './events.js';
 import { SERVERLESS } from '../runtime.js';
@@ -17,41 +16,41 @@ import { maybeAutoReply, pickAutoAssignAgent } from './aiResponder.js';
 export async function handleInboundMessage({ waId, name, text, waMessageId, type = 'text', mediaUrl = null }) {
   waId = String(waId).replace(/\D/g, '');
 
-  let contact = db.prepare('SELECT * FROM contacts WHERE wa_id = ?').get(waId);
+  let contact = await db.prepare('SELECT * FROM contacts WHERE wa_id = ?').get(waId);
   if (!contact) {
-    const info = db.prepare('INSERT INTO contacts (wa_id, name) VALUES (?, ?)').run(waId, name || null);
-    contact = db.prepare('SELECT * FROM contacts WHERE id = ?').get(info.lastInsertRowid);
+    const info = await db.prepare('INSERT INTO contacts (wa_id, name) VALUES (?, ?)').run(waId, name || null);
+    contact = await db.prepare('SELECT * FROM contacts WHERE id = ?').get(info.lastInsertRowid);
     emit('contact_created', { contact_id: contact.id });
   } else if (name && !contact.name) {
-    db.prepare('UPDATE contacts SET name = ? WHERE id = ?').run(name, contact.id);
+    await db.prepare('UPDATE contacts SET name = ? WHERE id = ?').run(name, contact.id);
   }
-  db.prepare("UPDATE contacts SET last_message_at = datetime('now') WHERE id = ?").run(contact.id);
+  await db.prepare('UPDATE contacts SET last_message_at = CURRENT_TIMESTAMP WHERE id = ?').run(contact.id);
 
-  let conversation = db.prepare(
+  let conversation = await db.prepare(
     "SELECT * FROM conversations WHERE contact_id = ? AND status != 'resolved' ORDER BY id DESC LIMIT 1"
   ).get(contact.id);
   let isNew = false;
   if (!conversation) {
     // Reopen the latest resolved thread if one exists, else create fresh.
-    const previous = db.prepare('SELECT * FROM conversations WHERE contact_id = ? ORDER BY id DESC LIMIT 1').get(contact.id);
+    const previous = await db.prepare('SELECT * FROM conversations WHERE contact_id = ? ORDER BY id DESC LIMIT 1').get(contact.id);
     if (previous) {
-      db.prepare("UPDATE conversations SET status = 'open', assigned_user_id = NULL, ai_enabled = 0 WHERE id = ?").run(previous.id);
-      conversation = db.prepare('SELECT * FROM conversations WHERE id = ?').get(previous.id);
-      addSystemNote(conversation.id, 'Conversation reopened');
+      await db.prepare("UPDATE conversations SET status = 'open', assigned_user_id = NULL, ai_enabled = 0 WHERE id = ?").run(previous.id);
+      conversation = await db.prepare('SELECT * FROM conversations WHERE id = ?').get(previous.id);
+      await addSystemNote(conversation.id, 'Conversation reopened');
       isNew = true;
     } else {
-      const info = db.prepare("INSERT INTO conversations (contact_id, status) VALUES (?, 'open')").run(contact.id);
-      conversation = db.prepare('SELECT * FROM conversations WHERE id = ?').get(info.lastInsertRowid);
+      const info = await db.prepare("INSERT INTO conversations (contact_id, status) VALUES (?, 'open')").run(contact.id);
+      conversation = await db.prepare('SELECT * FROM conversations WHERE id = ?').get(info.lastInsertRowid);
       isNew = true;
     }
   }
 
-  db.prepare(
+  await db.prepare(
     "INSERT INTO messages (conversation_id, direction, sender_type, type, body, wa_message_id, status, media_url) VALUES (?, 'in', 'contact', ?, ?, ?, 'received', ?)"
   ).run(conversation.id, type, text, waMessageId || null, mediaUrl);
   const preview = type === 'image' ? `📷 ${text || 'Photo'}` : type === 'audio' ? '🎤 Voice message' : text;
-  db.prepare(
-    "UPDATE conversations SET last_message_at = datetime('now'), last_message_preview = ?, unread_count = unread_count + 1, status = CASE WHEN status = 'resolved' THEN 'open' ELSE status END WHERE id = ?"
+  await db.prepare(
+    "UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP, last_message_preview = ?, unread_count = unread_count + 1, status = CASE WHEN status = 'resolved' THEN 'open' ELSE status END WHERE id = ?"
   ).run(preview.slice(0, 120), conversation.id);
 
   emit('message_created', { conversation_id: conversation.id });
@@ -60,17 +59,17 @@ export async function handleInboundMessage({ waId, name, text, waMessageId, type
   if (isNew) {
     // Skill-based routing: classify the first message, then prefer an AI
     // agent or staff pool that has the matching skill.
-    const skill = detectSkill(text);
+    const skill = await detectSkill(text);
     if (skill) {
-      db.prepare('UPDATE conversations SET required_skill = ? WHERE id = ?').run(skill, conversation.id);
-      addSystemNote(conversation.id, `🏷 Topic detected: ${skill}`);
+      await db.prepare('UPDATE conversations SET required_skill = ? WHERE id = ?').run(skill, conversation.id);
+      await addSystemNote(conversation.id, `🏷 Topic detected: ${skill}`);
     }
-    const aiAgent = pickAutoAssignAgent(skill);
+    const aiAgent = await pickAutoAssignAgent(skill);
     if (aiAgent) {
-      db.prepare('UPDATE conversations SET ai_enabled = 1, ai_agent_id = ? WHERE id = ?').run(aiAgent.id, conversation.id);
-      addSystemNote(conversation.id, `🤖 ${aiAgent.name} picked up this conversation`);
+      await db.prepare('UPDATE conversations SET ai_enabled = 1, ai_agent_id = ? WHERE id = ?').run(aiAgent.id, conversation.id);
+      await addSystemNote(conversation.id, `🤖 ${aiAgent.name} picked up this conversation`);
     } else {
-      roundRobinAssign(conversation.id, skill);
+      await roundRobinAssign(conversation.id, skill);
     }
   }
 
