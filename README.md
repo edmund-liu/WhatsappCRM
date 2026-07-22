@@ -63,6 +63,22 @@ watch the AI agent pick it up and reply. Send "I want to talk to a human" — wa
 handoff and round-robin assignment. Create a broadcast from the Broadcasts page and watch
 the delivery stats fill in live.
 
+## Deploying to Vercel
+
+The repo includes `api/index.js` + `vercel.json`, so importing the project into Vercel
+works out of the box (set the project's Node.js version to 22.x). Set a `JWT_SECRET`
+environment variable in the project settings so logins survive across instances.
+
+Serverless caveats — Vercel is great for demoing, but note:
+
+- **Data is ephemeral.** SQLite lives in `/tmp`, which resets on cold starts and is not
+  shared between instances. Every reset reseeds the demo accounts and sample data. For
+  real usage run the app on an always-on host (Railway, Render, Fly.io, a VPS) where the
+  database file persists.
+- **Scheduled broadcasts don't fire** (no background scheduler); "Send now" works — the
+  send completes within the request (60s max, so keep audiences modest).
+- Live updates automatically fall back from SSE to polling every few seconds.
+
 ## Going live with the real WhatsApp Cloud API
 
 1. Create a Meta app with the WhatsApp product and get a **Phone Number ID** and permanent

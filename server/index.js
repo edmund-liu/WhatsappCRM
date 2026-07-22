@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import apiRouter from './routes/api.js';
 import webhookRouter from './routes/webhook.js';
 import { startScheduler } from './services/broadcaster.js';
+import { SERVERLESS } from './runtime.js';
 import './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -20,10 +21,15 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error' });
 });
 
-startScheduler();
+// On serverless (Vercel) the platform invokes the app per request: no listen,
+// and no interval-based scheduler (scheduled broadcasts need an always-on host).
+if (!SERVERLESS) {
+  startScheduler();
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => {
+    console.log(`WhatsApp CRM running on http://localhost:${PORT}`);
+    console.log('Default login: admin@example.com / admin123');
+  });
+}
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`WhatsApp CRM running on http://localhost:${PORT}`);
-  console.log('Default login: admin@example.com / admin123');
-});
+export default app;

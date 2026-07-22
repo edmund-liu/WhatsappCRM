@@ -8,7 +8,9 @@ import db from '../db.js';
 import { emit } from './events.js';
 import { sendTemplate, renderTemplate, buildTemplateParams } from './whatsapp.js';
 
-const SEND_INTERVAL_MS = 150; // ~6-7 msgs/sec, well under Cloud API limits
+// ~6-7 msgs/sec, well under Cloud API limits. No pacing delay on serverless,
+// where the whole run must fit inside one request's execution window.
+const SEND_INTERVAL_MS = process.env.VERCEL ? 0 : 150;
 const running = new Set();
 
 export function audienceForBroadcast(broadcast) {
@@ -20,9 +22,9 @@ export function audienceForBroadcast(broadcast) {
 }
 
 export function startBroadcast(broadcastId) {
-  if (running.has(broadcastId)) return;
+  if (running.has(broadcastId)) return Promise.resolve();
   running.add(broadcastId);
-  runBroadcast(broadcastId)
+  return runBroadcast(broadcastId)
     .catch((err) => console.error(`Broadcast ${broadcastId} failed:`, err))
     .finally(() => running.delete(broadcastId));
 }

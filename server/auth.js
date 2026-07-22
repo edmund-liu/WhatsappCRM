@@ -4,8 +4,16 @@ import crypto from 'crypto';
 
 let secret = process.env.JWT_SECRET || getSetting('jwt_secret');
 if (!secret) {
-  secret = crypto.randomBytes(32).toString('hex');
-  setSetting('jwt_secret', secret);
+  if (process.env.VERCEL) {
+    // The DB is ephemeral and per-instance on serverless, so a random secret
+    // would invalidate logins on every cold start / across instances. Use a
+    // fixed demo secret and tell the operator to set a real one.
+    secret = 'demo-only-secret-set-JWT_SECRET-env-var';
+    console.warn('WARNING: JWT_SECRET env var not set — using an insecure demo secret. Set JWT_SECRET in your Vercel project settings.');
+  } else {
+    secret = crypto.randomBytes(32).toString('hex');
+    setSetting('jwt_secret', secret);
+  }
 }
 
 export function signToken(user) {

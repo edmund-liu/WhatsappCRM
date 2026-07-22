@@ -10,6 +10,7 @@
 //   3. Existing conversations keep their owner; AI keeps replying if enabled.
 import db from '../db.js';
 import { emit } from './events.js';
+import { SERVERLESS } from '../runtime.js';
 import { roundRobinAssign, addSystemNote } from './assignment.js';
 import { maybeAutoReply, pickAutoAssignAgent } from './aiResponder.js';
 
@@ -65,8 +66,10 @@ export async function handleInboundMessage({ waId, name, text, waMessageId, type
     }
   }
 
-  // Fire-and-forget so webhook responses stay fast (Meta requires <10s).
-  maybeAutoReply(conversation.id, text).catch((err) => console.error('Auto-reply error:', err));
+  // Always-on servers fire-and-forget so webhook responses stay fast (Meta
+  // requires <10s). Serverless freezes after the response, so await there.
+  const autoReply = maybeAutoReply(conversation.id, text).catch((err) => console.error('Auto-reply error:', err));
+  if (SERVERLESS) await autoReply;
 
   return { contact, conversation };
 }

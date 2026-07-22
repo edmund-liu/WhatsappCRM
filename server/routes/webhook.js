@@ -4,6 +4,7 @@
 // POST /webhook/whatsapp  -> inbound messages + delivery status updates
 import { Router } from 'express';
 import db, { getSetting } from '../db.js';
+import { SERVERLESS } from '../runtime.js';
 import { handleInboundMessage } from '../services/inbound.js';
 import { applyStatusUpdate } from '../services/whatsapp.js';
 
@@ -19,9 +20,11 @@ router.get('/whatsapp', (req, res) => {
   res.sendStatus(403);
 });
 
-router.post('/whatsapp', (req, res) => {
-  // Always ack fast; Meta retries on non-200 and requires a quick response.
-  res.sendStatus(200);
+router.post('/whatsapp', async (req, res) => {
+  // Always-on servers ack immediately (Meta retries on non-200 and requires a
+  // quick response) and process afterwards. Serverless freezes the process
+  // once the response is sent, so there the work happens first.
+  if (!SERVERLESS) res.sendStatus(200);
   try {
     for (const entry of req.body?.entry || []) {
       for (const change of entry.changes || []) {
@@ -45,13 +48,14 @@ router.post('/whatsapp', (req, res) => {
             msg.interactive?.button_reply?.title ??
             msg.interactive?.list_reply?.title ??
             `[${msg.type} message]`;
-          handleInboundMessage({
+          const handling = handleInboundMessage({
             waId: msg.from,
             name: contactNames[msg.from],
             text,
             waMessageId: msg.id,
             type: msg.type === 'text' ? 'text' : msg.type,
           }).catch((err) => console.error('Inbound handling error:', err));
+          if (SERVERLESS) await handling;
         }
 
         for (const status of value.statuses || []) {
@@ -65,6 +69,7 @@ router.post('/whatsapp', (req, res) => {
   } catch (err) {
     console.error('Webhook processing error:', err);
   }
+  if (SERVERLESS) res.sendStatus(200);
 });
 
 export default router;

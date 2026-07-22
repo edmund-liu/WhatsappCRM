@@ -90,15 +90,46 @@
     localStorage.removeItem('user');
     state.token = null; state.user = null;
     if (es) { es.close(); es = null; }
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     render();
   }
 
-  // ---------- SSE live updates ----------
+  // ---------- Live updates: SSE with polling fallback ----------
+  // Serverless hosts (e.g. Vercel) can't hold SSE connections open, so if the
+  // stream drops repeatedly we fall back to polling.
+  let pollTimer = null;
+  let sseFailures = 0;
+
+  function userIsTyping() {
+    const el = document.activeElement;
+    return el && (el.tagName === 'TEXTAREA' || el.tagName === 'INPUT') && el.value;
+  }
+
+  async function refreshCurrentView() {
+    if (userIsTyping()) return; // don't re-render under the user's cursor
+    if (state.route === 'inbox') {
+      await loadConversations();
+      if (state.activeConvId) await loadMessages(state.activeConvId, false).catch(() => {});
+      renderRoute();
+    } else if (['broadcasts', 'contacts', 'analytics'].includes(state.route)) {
+      renderRoute();
+    }
+  }
+
+  function startPolling() {
+    if (pollTimer) return;
+    pollTimer = setInterval(() => refreshCurrentView().catch(() => {}), 4000);
+  }
+
   function connectEvents() {
     if (es) es.close();
     es = new EventSource('/api/events?token=' + encodeURIComponent(state.token));
+    es.onopen = () => { sseFailures = 0; };
+    es.onerror = () => {
+      if (++sseFailures >= 3) { es.close(); es = null; startPolling(); }
+    };
     const refreshInbox = async (e) => {
-      if (state.route !== 'inbox') return;
+      if (state.route !== 'inbox' || userIsTyping()) return;
       const data = JSON.parse(e.data || '{}');
       await loadConversations();
       if (data.conversation_id === state.activeConvId) await loadMessages(state.activeConvId, false);

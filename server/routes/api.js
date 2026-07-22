@@ -7,6 +7,7 @@ import { sendText, isSandbox, markConversationRead, pullTemplatesFromMeta, pushT
 import { assignConversation, addSystemNote } from '../services/assignment.js';
 import { startBroadcast, broadcastStats, audienceForBroadcast } from '../services/broadcaster.js';
 import { handleInboundMessage } from '../services/inbound.js';
+import { SERVERLESS } from '../runtime.js';
 
 const router = Router();
 
@@ -270,7 +271,7 @@ router.get('/broadcasts', (req, res) => {
   res.json(rows.map((b) => ({ ...b, stats: broadcastStats(b.id) })));
 });
 
-router.post('/broadcasts', (req, res) => {
+router.post('/broadcasts', async (req, res) => {
   const { name, template_id, variables, audience_tag, scheduled_at, send_now } = req.body || {};
   const template = db.prepare('SELECT * FROM templates WHERE id = ?').get(template_id);
   if (!name || !template) return res.status(400).json({ error: 'name and a valid template_id are required' });
@@ -279,7 +280,10 @@ router.post('/broadcasts', (req, res) => {
     'INSERT INTO broadcasts (name, template_id, variables, audience_tag, status, scheduled_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)'
   ).run(name, template.id, JSON.stringify(variables || []), audience_tag || null, status, scheduled_at || null, req.user.id);
   const id = info.lastInsertRowid;
-  if (send_now) startBroadcast(id);
+  if (send_now) {
+    const run = startBroadcast(id);
+    if (SERVERLESS) await run; // background work dies with the response on serverless
+  }
   res.json(db.prepare('SELECT * FROM broadcasts WHERE id = ?').get(id));
 });
 
@@ -288,11 +292,12 @@ router.get('/broadcasts/:id/audience-preview', (req, res) => {
   res.json({ count: audience.length });
 });
 
-router.post('/broadcasts/:id/send', (req, res) => {
+router.post('/broadcasts/:id/send', async (req, res) => {
   const b = db.prepare('SELECT * FROM broadcasts WHERE id = ?').get(req.params.id);
   if (!b) return res.status(404).json({ error: 'Broadcast not found' });
   if (['completed', 'cancelled'].includes(b.status)) return res.status(400).json({ error: `Broadcast already ${b.status}` });
-  startBroadcast(b.id);
+  const run = startBroadcast(b.id);
+  if (SERVERLESS) await run;
   res.json({ ok: true });
 });
 

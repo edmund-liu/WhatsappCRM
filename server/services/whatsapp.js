@@ -8,6 +8,7 @@
 //    through the same webhook status pipeline the live API would use.
 import db, { getSetting, computeParamMap } from '../db.js';
 import { emit } from './events.js';
+import { SERVERLESS } from '../runtime.js';
 
 const GRAPH_VERSION = 'v21.0';
 
@@ -34,8 +35,13 @@ function fakeMessageId() {
 }
 
 // Simulate delivery + read receipts in sandbox mode, driving the same
-// status-update path the real webhook would.
+// status-update path the real webhook would. Serverless platforms freeze the
+// process after the response, so timers never fire there — apply immediately.
 function simulateReceipts(waMessageId) {
+  if (SERVERLESS) {
+    setImmediate(() => { applyStatusUpdate(waMessageId, 'delivered'); applyStatusUpdate(waMessageId, 'read'); });
+    return;
+  }
   setTimeout(() => applyStatusUpdate(waMessageId, 'delivered'), 800 + Math.random() * 1200);
   setTimeout(() => applyStatusUpdate(waMessageId, 'read'), 3000 + Math.random() * 4000);
 }
