@@ -343,6 +343,7 @@
             <div><b>Select a conversation</b></div>
             <div>or click “📱 Simulate customer” to receive a test message</div>
           </div></div>`}
+        ${state.activeConv && state.infoOpen ? renderContactPanel() : ''}
       </div>`;
 
     $main.querySelectorAll('[data-filter]').forEach((b) => b.addEventListener('click', async () => {
@@ -377,13 +378,20 @@
             ${c.status !== 'resolved'
               ? '<button class="btn small" id="resolve-btn">✓ Resolve</button>'
               : '<button class="btn small secondary" id="reopen-btn">Reopen</button>'}
+            <button class="icon-btn" id="info-toggle" title="Contact info & history">ℹ️</button>
           </div>
         </div>
         <div class="thread-msgs">
           ${(() => {
             let prevKey = null;
             return state.messages.map((m) => {
-              if (m.sender_type === 'system') { prevKey = 'sys'; return `<div class="sysnote">${esc(m.body)}</div>`; }
+              if (m.sender_type === 'system') {
+                prevKey = 'sys';
+                if (m.body.startsWith('📋')) {
+                  return `<div class="handoff-card"><div class="hc-title">📋 Handoff summary</div>${esc(m.body.replace(/^📋 Handoff summary — /, ''))}</div>`;
+                }
+                return `<div class="sysnote">${esc(m.body)}</div>`;
+              }
               const groupKey = m.direction + ':' + (m.sender_user_id || m.ai_agent_id || m.sender_type);
               const first = groupKey !== prevKey;
               prevKey = groupKey;
@@ -461,6 +469,48 @@
     document.getElementById('composer-input')?.focus();
   }
 
+  // Right-hand panel: who the customer is and the shape of the relationship,
+  // so an agent taking over a chat has context at a glance.
+  function renderContactPanel() {
+    const c = state.activeConv;
+    const msgs = state.messages.filter((m) => m.sender_type !== 'system');
+    const inbound = msgs.filter((m) => m.direction === 'in');
+    const aiMsgs = msgs.filter((m) => m.sender_type === 'ai');
+    const media = msgs.filter((m) => m.media_url);
+    const firstMsg = msgs[0];
+    const summaries = state.messages.filter((m) => m.sender_type === 'system' && m.body.startsWith('📋'));
+    const lastSummary = summaries[summaries.length - 1];
+    return `
+      <aside class="contact-panel">
+        <div style="text-align:center;padding:14px 0 10px">
+          <span class="avatar" style="width:64px;height:64px;font-size:22px">${initials(c.contact_name)}</span>
+          <div style="font-weight:700;font-size:16px;margin-top:8px">${esc(c.contact_name || 'Unknown')}</div>
+          <div class="muted mono">+${esc(c.wa_id)}</div>
+          <div style="margin-top:6px">${c.contact_tags.map((t) => `<span class="badge green">${esc(t)}</span>`).join(' ')}</div>
+        </div>
+        ${lastSummary ? `<div class="cp-section"><div class="cp-label">Latest handoff summary</div>
+          <div class="cp-summary">${esc(lastSummary.body.replace(/^📋 Handoff summary — /, ''))}</div></div>` : ''}
+        <div class="cp-section">
+          <div class="cp-label">Conversation</div>
+          <div class="cp-row"><span>Status</span><span>${statusBadge(c.status)}</span></div>
+          ${c.required_skill ? `<div class="cp-row"><span>Topic</span><span class="badge amber">🏷 ${esc(c.required_skill)}</span></div>` : ''}
+          <div class="cp-row"><span>Assigned to</span><span>${esc(c.assigned_name || '—')}</span></div>
+          ${c.ai_enabled ? `<div class="cp-row"><span>AI agent</span><span class="badge purple">🤖 ${esc(c.ai_agent_name)}</span></div>` : ''}
+          <div class="cp-row"><span>First message</span><span>${firstMsg ? fmtTime(firstMsg.created_at) : '—'}</span></div>
+        </div>
+        <div class="cp-section">
+          <div class="cp-label">History (all in this thread)</div>
+          <div class="cp-row"><span>Total messages</span><span><b>${msgs.length}</b></span></div>
+          <div class="cp-row"><span>From customer</span><span>${inbound.length}</span></div>
+          <div class="cp-row"><span>AI replies</span><span>${aiMsgs.length}</span></div>
+          <div class="cp-row"><span>Media shared</span><span>${media.length}</span></div>
+        </div>
+        <div class="cp-section muted" style="font-size:12px">
+          Scroll the thread to read the full past conversation — everything the customer, AI, and team exchanged is kept here.
+        </div>
+      </aside>`;
+  }
+
   function wireThread($main) {
     const c = state.activeConv;
     const send = async () => {
@@ -501,6 +551,11 @@
     });
     renderAttachPreview();
     composerInput.focus();
+
+    document.getElementById('info-toggle').addEventListener('click', () => {
+      state.infoOpen = !state.infoOpen;
+      renderRoute();
+    });
 
     // Assignment dropdown
     api('/users').then((users) => {

@@ -83,9 +83,53 @@ function ruleReply(text) {
   return "Thanks for your message! I'll do my best to help — could you tell me a bit more? If you'd prefer a human, just say 'agent'.";
 }
 
+// Recap of the AI-handled portion so the human taking over has instant
+// context without re-reading the whole thread. Uses Claude when a key is
+// configured; otherwise builds a compact digest from the transcript.
+async function buildHandoffSummary(conversation, agent) {
+  const msgs = db.prepare(
+    "SELECT sender_type, body FROM messages WHERE conversation_id = ? AND sender_type IN ('contact','ai','agent') ORDER BY id"
+  ).all(conversation.id);
+  const contact = db.prepare('SELECT name FROM contacts WHERE id = ?').get(conversation.contact_id);
+  const apiKey = getSetting('anthropic_api_key') || process.env.ANTHROPIC_API_KEY;
+  if (apiKey && msgs.length) {
+    try {
+      const transcript = msgs.map((m) => `${m.sender_type === 'contact' ? 'Customer' : 'Assistant'}: ${m.body || '[media]'}`)
+        .join('\n').slice(-4000);
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: agent.model,
+          max_tokens: 200,
+          system: 'Summarize this WhatsApp support conversation in 2-3 short sentences for the human agent taking over. State what the customer needs and repeat any concrete details they gave (order/invoice numbers, amounts, dates). No preamble.',
+          messages: [{ role: 'user', content: transcript }],
+        }),
+      });
+      if (res.ok) {
+        const json = await res.json();
+        const text = json.content?.map((b) => b.text || '').join('').trim();
+        if (text) return text;
+      }
+    } catch (err) {
+      console.error('Handoff summary generation failed:', err.message);
+    }
+  }
+  // Fallback digest without an API key.
+  const customerMsgs = msgs.filter((m) => m.sender_type === 'contact' && m.body);
+  const parts = [];
+  if (conversation.required_skill) parts.push(`Topic: ${conversation.required_skill}.`);
+  if (customerMsgs[0]) parts.push(`${contact?.name || 'Customer'} opened with: "${customerMsgs[0].body.slice(0, 120)}"`);
+  const details = customerMsgs.slice(1, 4).map((m) => `"${m.body.slice(0, 90)}"`);
+  if (details.length) parts.push(`Then said: ${details.join(' · ')}`);
+  return parts.join(' ') || 'No prior messages.';
+}
+
 async function handoffToHuman(conversation, agent, reason) {
   db.prepare('UPDATE conversations SET ai_enabled = 0 WHERE id = ?').run(conversation.id);
   addSystemNote(conversation.id, `🤖 ${agent.name} handed off to a human (${reason})`);
+  const summary = await buildHandoffSummary(conversation, agent);
+  addSystemNote(conversation.id, `📋 Handoff summary — ${summary}`);
   if (!conversation.assigned_user_id) {
     const human = roundRobinAssign(conversation.id, conversation.required_skill);
     const note = human

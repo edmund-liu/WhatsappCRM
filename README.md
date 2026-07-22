@@ -31,6 +31,11 @@ assignment, staff sign-in, and Claude-powered AI agents that auto-reply and hand
   human (or the AI decides it can't help), the chat is handed off round-robin to a teammate.
   A human replying always takes over from the AI. Without an API key a built-in rule-based
   responder is used, so the flow is fully demoable offline.
+- **Handoff with full context** — the receiving agent sees the entire past conversation
+  (customer, AI, and team messages) in the thread, plus a **handoff summary card** pinned
+  at the transfer point recapping what the customer needs and the details they gave
+  (AI-written when an Anthropic key is set, digest-based otherwise). An ℹ️ contact panel
+  shows the latest summary, topic, assignment, and history stats at a glance.
 - **Contacts & tags** — contact book with tags (used as broadcast audiences), custom
   attributes, opt-out flag.
 - **Templates with Meta sync** — reusable message templates with `{{name}}` personalization

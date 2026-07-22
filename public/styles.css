@@ -124,6 +124,14 @@ label.field .input { margin-top: 5px; font-weight: 400; color: var(--text); }
 .ticks { letter-spacing: -2px; }
 .ticks.read { color: #53bdeb; }
 .sysnote { align-self: center; background: #fdf3d7; color: #6b5b1f; border-radius: 999px; padding: 3px 12px; font-size: 11.5px; box-shadow: var(--shadow); max-width: 80%; text-align: center; margin-top: 10px; }
+.handoff-card { align-self: center; background: #fffbea; border: 1px solid #f3e4b5; border-radius: 10px; padding: 10px 14px; font-size: 13px; max-width: 70%; margin-top: 10px; box-shadow: var(--shadow); line-height: 1.45; color: #5c4d1a; }
+.handoff-card .hc-title { font-weight: 700; margin-bottom: 3px; color: var(--amber); }
+.contact-panel { width: 272px; flex-shrink: 0; background: var(--panel); border-left: 1px solid var(--border); overflow-y: auto; padding: 8px 16px 16px; }
+.cp-section { border-top: 1px solid var(--border); padding: 12px 0; }
+.cp-label { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); font-weight: 700; margin-bottom: 8px; }
+.cp-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 6px; color: var(--text); }
+.cp-row > span:first-child { color: var(--muted); }
+.cp-summary { background: #fffbea; border-radius: 8px; padding: 8px 10px; font-size: 12.5px; line-height: 1.45; color: #5c4d1a; }
 .bubble.has-img { padding: 4px 4px 6px; max-width: min(65%, 340px); }
 .bubble.has-img .sender { padding: 1px 5px 0; }
 .bubble.has-img .msg-text { padding: 3px 5px 0; }
