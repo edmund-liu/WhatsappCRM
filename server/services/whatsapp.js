@@ -61,12 +61,21 @@ export async function sendText(toWaId, text) {
   });
 }
 
-export async function sendTemplate(toWaId, template, bodyParams) {
+export async function sendTemplate(toWaId, template, bodyParams, { headerImageUrl = null } = {}) {
   if (isSandbox()) {
     const id = fakeMessageId();
     simulateReceipts(id);
     return id;
   }
+  const components = [];
+  if (headerImageUrl) {
+    components.push({ type: 'header', parameters: [{ type: 'image', image: { link: headerImageUrl } }] });
+  }
+  if (bodyParams.length) {
+    components.push({ type: 'body', parameters: bodyParams.map((t) => ({ type: 'text', text: t })) });
+  }
+  // Static URL and quick-reply buttons live on the approved template itself
+  // and need no send-time parameters.
   return graphSend({
     messaging_product: 'whatsapp',
     to: toWaId,
@@ -74,9 +83,7 @@ export async function sendTemplate(toWaId, template, bodyParams) {
     template: {
       name: template.name,
       language: { code: template.language },
-      components: bodyParams.length
-        ? [{ type: 'body', parameters: bodyParams.map((t) => ({ type: 'text', text: t })) }]
-        : [],
+      components,
     },
   });
 }
@@ -131,9 +138,11 @@ function wabaConfig() {
 export async function pullTemplatesFromMeta() {
   const { token, wabaId } = wabaConfig();
   const upsert = db.prepare(`
-    INSERT INTO templates (name, language, category, body, status, param_map, meta_id) VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO templates (name, language, category, body, status, param_map, meta_id, header_image_url, buttons)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(name) DO UPDATE SET language = excluded.language, category = excluded.category,
-      body = excluded.body, status = excluded.status, param_map = excluded.param_map, meta_id = excluded.meta_id
+      body = excluded.body, status = excluded.status, param_map = excluded.param_map, meta_id = excluded.meta_id,
+      header_image_url = COALESCE(excluded.header_image_url, header_image_url), buttons = excluded.buttons
   `);
   let url = `https://graph.facebook.com/${GRAPH_VERSION}/${wabaId}/message_templates?fields=name,status,category,language,components&limit=100`;
   let count = 0;
@@ -145,8 +154,17 @@ export async function pullTemplatesFromMeta() {
       const bodyComp = (t.components || []).find((c) => c.type === 'BODY');
       if (!bodyComp?.text) continue;
       const category = ['MARKETING', 'UTILITY', 'AUTHENTICATION'].includes(t.category) ? t.category : 'MARKETING';
+      const headerComp = (t.components || []).find((c) => c.type === 'HEADER' && c.format === 'IMAGE');
+      // Meta returns an upload handle (not a URL) as the header example; only
+      // keep it if it looks like a usable link, else the operator sets one.
+      const headerExample = headerComp?.example?.header_handle?.[0];
+      const headerUrl = headerExample && /^https?:\/\//.test(headerExample) ? headerExample : null;
+      const buttonsComp = (t.components || []).find((c) => c.type === 'BUTTONS');
+      const buttons = (buttonsComp?.buttons || [])
+        .filter((b) => ['QUICK_REPLY', 'URL'].includes(b.type))
+        .map((b) => ({ type: b.type, text: b.text, ...(b.type === 'URL' ? { url: b.url } : {}) }));
       upsert.run(t.name, t.language || 'en', category, bodyComp.text, t.status || 'APPROVED',
-        JSON.stringify(computeParamMap(bodyComp.text)), t.id || null);
+        JSON.stringify(computeParamMap(bodyComp.text)), t.id || null, headerUrl, JSON.stringify(buttons));
       count++;
     }
     url = json.paging?.next || null;
@@ -161,9 +179,27 @@ export async function pushTemplateToMeta(template) {
   const { token, wabaId } = wabaConfig();
   const metaBody = toMetaBody(template.body);
   const map = computeParamMap(template.body);
-  const component = { type: 'BODY', text: metaBody };
+  const components = [];
+  if (template.header_image_url) {
+    // Meta prefers an upload handle here; a public URL works for many WABAs.
+    // If Meta rejects it, upload the sample via the Resumable Upload API or
+    // create the template in Business Manager and pull it with template sync.
+    components.push({ type: 'HEADER', format: 'IMAGE', example: { header_handle: [template.header_image_url] } });
+  }
+  const bodyComponent = { type: 'BODY', text: metaBody };
   if (map.length) {
-    component.example = { body_text: [map.map((tok, i) => (tok === 'name' ? 'Alex' : `example ${i + 1}`))] };
+    bodyComponent.example = { body_text: [map.map((tok, i) => (tok === 'name' ? 'Alex' : `example ${i + 1}`))] };
+  }
+  components.push(bodyComponent);
+  let buttons = [];
+  try { buttons = JSON.parse(template.buttons || '[]'); } catch { /* ignore */ }
+  if (buttons.length) {
+    components.push({
+      type: 'BUTTONS',
+      buttons: buttons.map((b) => b.type === 'URL'
+        ? { type: 'URL', text: b.text, url: b.url }
+        : { type: 'QUICK_REPLY', text: b.text }),
+    });
   }
   const res = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${wabaId}/message_templates`, {
     method: 'POST',
@@ -172,7 +208,7 @@ export async function pushTemplateToMeta(template) {
       name: template.name,
       language: template.language,
       category: template.category,
-      components: [component],
+      components,
     }),
   });
   const json = await res.json();

@@ -15,9 +15,12 @@ assignment, staff sign-in, and Claude-powered AI agents that auto-reply and hand
   the matching skill. Distribution is round-robin *within* each skill pool (persistent
   per-pool cursors), falling back to the general pool when no skill matches or nobody has
   it. Staff toggle their availability from the sidebar; away members are skipped.
-- **Broadcasts** — template campaigns to all contacts or a tag segment, sent immediately or
-  scheduled. Per-recipient delivery tracking (queued → sent → delivered → read / failed),
-  live progress bars, cancel mid-send, opt-out respected, rate-limited sending.
+- **Broadcasts with rich media** — template campaigns to all contacts or a tag segment,
+  sent immediately or scheduled. Templates support **header images**, **quick-reply
+  buttons**, and **link (URL) buttons** (up to 3, mirroring Meta's template model), with a
+  live preview in the campaign composer and a per-campaign image override. Per-recipient
+  delivery tracking (queued → sent → delivered → read / failed), live progress bars, cancel
+  mid-send, opt-out respected, rate-limited sending.
 - **AI agents** — configurable bots (name, system prompt, model, handoff keywords) that pick
   up new conversations and auto-reply using the Anthropic API. When the customer asks for a
   human (or the AI decides it can't help), the chat is handed off round-robin to a teammate.

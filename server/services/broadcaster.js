@@ -58,11 +58,13 @@ async function runBroadcast(broadcastId) {
       // Positional params for Meta (via param_map); local rendering keeps
       // {{name}}/{{n}} semantics for the conversation-thread copy.
       const params = buildTemplateParams(template, contact, variables);
-      const waMessageId = await sendTemplate(contact.wa_id, template, params);
+      const headerImageUrl = broadcast.header_image_url || template.header_image_url || null;
+      const waMessageId = await sendTemplate(contact.wa_id, template, params, { headerImageUrl });
       const renderedVars = variables.map((v) => renderTemplate(v, contact));
       db.prepare("UPDATE broadcast_recipients SET status = 'sent', wa_message_id = ?, sent_at = datetime('now') WHERE id = ?")
         .run(waMessageId, contact.recipient_id);
-      recordBroadcastMessage(broadcastId, contact, renderTemplate(template.body, contact, renderedVars), waMessageId);
+      recordBroadcastMessage(broadcastId, contact, renderTemplate(template.body, contact, renderedVars), waMessageId,
+        { mediaUrl: headerImageUrl, buttons: template.buttons });
     } catch (err) {
       db.prepare("UPDATE broadcast_recipients SET status = 'failed', error = ? WHERE id = ?")
         .run(String(err.message).slice(0, 300), contact.recipient_id);
@@ -76,15 +78,15 @@ async function runBroadcast(broadcastId) {
 }
 
 // Broadcast sends also appear in the contact's conversation thread.
-function recordBroadcastMessage(broadcastId, contact, renderedBody, waMessageId) {
+function recordBroadcastMessage(broadcastId, contact, renderedBody, waMessageId, { mediaUrl = null, buttons = '[]' } = {}) {
   let conv = db.prepare('SELECT id FROM conversations WHERE contact_id = ? ORDER BY id DESC LIMIT 1').get(contact.id);
   if (!conv) {
     const info = db.prepare("INSERT INTO conversations (contact_id, status, last_message_at) VALUES (?, 'resolved', datetime('now'))").run(contact.id);
     conv = { id: info.lastInsertRowid };
   }
   db.prepare(
-    "INSERT INTO messages (conversation_id, direction, sender_type, type, body, wa_message_id, status) VALUES (?, 'out', 'broadcast', 'template', ?, ?, 'sent')"
-  ).run(conv.id, renderedBody, waMessageId);
+    "INSERT INTO messages (conversation_id, direction, sender_type, type, body, wa_message_id, status, media_url, buttons) VALUES (?, 'out', 'broadcast', 'template', ?, ?, 'sent', ?, ?)"
+  ).run(conv.id, renderedBody, waMessageId, mediaUrl, buttons || '[]');
   db.prepare("UPDATE conversations SET last_message_at = datetime('now'), last_message_preview = ? WHERE id = ?")
     .run(`📣 ${renderedBody}`.slice(0, 120), conv.id);
   emit('message_created', { conversation_id: conv.id });

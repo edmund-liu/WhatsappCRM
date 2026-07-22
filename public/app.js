@@ -347,9 +347,15 @@
             const senderLabel = m.sender_type === 'ai' ? `<div class="sender ai">🤖 ${esc(m.ai_agent_name || 'AI Agent')}</div>`
               : m.sender_type === 'broadcast' ? '<div class="sender broadcast">📣 Broadcast</div>'
               : m.sender_type === 'agent' && m.sender_name ? `<div class="sender">${esc(m.sender_name)}</div>` : '';
+            let msgButtons = [];
+            try { msgButtons = JSON.parse(m.buttons || '[]'); } catch {}
             return `<div class="bubble ${m.direction}">
               ${senderLabel}
+              ${m.media_url ? `<img class="bubble-img" src="${esc(m.media_url)}" alt="" loading="lazy" onerror="this.style.display='none'" />` : ''}
               <div>${esc(m.body)}</div>
+              ${msgButtons.length ? `<div class="bubble-btns">${msgButtons.map((b) => b.type === 'URL'
+                ? `<a class="bubble-btn" href="${esc(b.url)}" target="_blank" rel="noopener">🔗 ${esc(b.text)}</a>`
+                : `<span class="bubble-btn">↩ ${esc(b.text)}</span>`).join('')}</div>` : ''}
               <div class="stamp">${fmtTime(m.created_at)} ${m.direction === 'out' ? ticks(m.status) : ''}</div>
             </div>`;
           }).join('')}
@@ -524,8 +530,10 @@
         <label class="field">Template
           <select class="input" id="bc-template">${templates.map((t) => `<option value="${t.id}">${esc(t.name)} (${esc(t.language)})</option>`).join('')}</select>
         </label>
-        <div class="muted mono" id="bc-preview" style="background:var(--bg);border-radius:8px;padding:10px;margin-bottom:12px"></div>
+        <div class="tpl-preview" id="bc-preview"></div>
         <div id="bc-vars"></div>
+        <label class="field">Header image URL override (optional — replaces the template's image)
+          <input class="input" id="bc-image" placeholder="https://example.com/campaign-banner.jpg" /></label>
         <label class="field">Audience
           <select class="input" id="bc-audience">
             <option value="">All contacts</option>
@@ -543,7 +551,13 @@
       const varInputs = () => [...m.querySelectorAll('[data-var]')].map((i) => i.value);
       const refreshTemplate = () => {
         const t = templates.find((x) => x.id === Number(m.querySelector('#bc-template').value));
-        m.querySelector('#bc-preview').textContent = t.body;
+        const overrideUrl = m.querySelector('#bc-image').value.trim();
+        const imageUrl = overrideUrl || t.header_image_url;
+        m.querySelector('#bc-preview').innerHTML = `
+          ${imageUrl ? `<img src="${esc(imageUrl)}" alt="" />` : ''}
+          <div class="mono muted" style="white-space:pre-wrap">${esc(t.body)}</div>
+          ${(t.buttons || []).length ? `<div class="pv-btns">${t.buttons.map((b) =>
+            `<div class="pv-btn">${b.type === 'URL' ? '🔗' : '↩'} ${esc(b.text)}</div>`).join('')}</div>` : ''}`;
         const nVars = Math.max(0, ...[...t.body.matchAll(/\{\{(\d+)\}\}/g)].map((x) => Number(x[1])), 0);
         m.querySelector('#bc-vars').innerHTML = Array.from({ length: nVars }, (_, i) =>
           `<label class="field">Variable {{${i + 1}}} <input class="input" data-var placeholder="Value for {{${i + 1}}} — you can use {{name}}" /></label>`).join('');
@@ -555,6 +569,7 @@
       };
       refreshTemplate(); refreshCount();
       m.querySelector('#bc-template').addEventListener('change', refreshTemplate);
+      m.querySelector('#bc-image').addEventListener('input', refreshTemplate);
       m.querySelector('#bc-audience').addEventListener('change', refreshCount);
       m.querySelector('#bc-cancel').addEventListener('click', () => m.remove());
 
@@ -567,6 +582,7 @@
           audience_tag: m.querySelector('#bc-audience').value || null,
           scheduled_at: scheduleRaw ? scheduleRaw.replace('T', ' ') + ':00' : null,
           send_now: sendNow,
+          header_image_url: m.querySelector('#bc-image').value.trim() || undefined,
         };
         try { await api('/broadcasts', { method: 'POST', body }); m.remove(); toast(sendNow ? 'Broadcast sending 🚀' : 'Broadcast saved'); renderRoute(); }
         catch (err) { toast(err.message, true); }
@@ -604,7 +620,12 @@
               <td class="mono"><b>${esc(t.name)}</b></td>
               <td><span class="badge ${t.category === 'MARKETING' ? 'purple' : 'blue'}">${t.category}</span></td>
               <td>${esc(t.language)}</td>
-              <td style="max-width:380px">${esc(t.body)}</td>
+              <td style="max-width:380px">${esc(t.body)}
+                <div style="margin-top:4px">
+                  ${t.header_image_url ? '<span class="badge blue">🖼 image</span>' : ''}
+                  ${(t.buttons || []).map((b) => `<span class="badge gray">${b.type === 'URL' ? '🔗' : '↩'} ${esc(b.text)}</span>`).join(' ')}
+                </div>
+              </td>
               <td><span class="badge ${tplBadge(t.status)}">${esc(t.status)}</span>${t.meta_id ? '<br/><span class="muted" style="font-size:11px">synced to Meta</span>' : ''}</td>
               <td style="text-align:right">${isAdmin ? `
                 ${!t.meta_id ? `<button class="btn small ghost" data-submit="${t.id}">Submit to Meta</button>` : ''}
@@ -644,15 +665,48 @@
           <label class="field">Language <input class="input" id="tp-lang" value="en" /></label>
         </div>
         <label class="field">Body <textarea class="input" id="tp-body" rows="4" placeholder="Hi {{name}}! Our summer sale starts {{1}} — up to {{2}} off."></textarea></label>
+        <label class="field">Header image URL (optional) <input class="input" id="tp-image" placeholder="https://example.com/banner.jpg" /></label>
+        <div style="margin-bottom:6px"><b style="font-size:13px;color:var(--muted)">BUTTONS (up to 3)</b></div>
+        <div id="tp-buttons"></div>
+        <button class="btn small ghost" id="tp-add-btn" type="button">+ Add button</button>
         <div class="actions"><button class="btn secondary" id="tp-cancel">Cancel</button><button class="btn" id="tp-save">Create</button></div>`);
+
+      const buttonsWrap = m.querySelector('#tp-buttons');
+      const addButtonRow = (btn) => {
+        if (buttonsWrap.children.length >= 3) return toast('Maximum 3 buttons', true);
+        const row = document.createElement('div');
+        row.className = 'btn-row';
+        row.innerHTML = `
+          <select class="input bt-type">
+            <option value="QUICK_REPLY" ${btn?.type !== 'URL' ? 'selected' : ''}>Quick reply</option>
+            <option value="URL" ${btn?.type === 'URL' ? 'selected' : ''}>Link (URL)</option>
+          </select>
+          <input class="input bt-text" placeholder="Button text" maxlength="25" value="${esc(btn?.text || '')}" />
+          <input class="input bt-url" placeholder="https://…" value="${esc(btn?.url || '')}" style="${btn?.type === 'URL' ? '' : 'display:none'}" />
+          <button class="btn small danger bt-del" type="button">✕</button>`;
+        row.querySelector('.bt-type').addEventListener('change', (e) => {
+          row.querySelector('.bt-url').style.display = e.target.value === 'URL' ? '' : 'none';
+        });
+        row.querySelector('.bt-del').addEventListener('click', () => row.remove());
+        buttonsWrap.appendChild(row);
+      };
+      m.querySelector('#tp-add-btn').addEventListener('click', () => addButtonRow(null));
+
       m.querySelector('#tp-cancel').addEventListener('click', () => m.remove());
       m.querySelector('#tp-save').addEventListener('click', async () => {
+        const buttons = [...buttonsWrap.querySelectorAll('.btn-row')].map((row) => ({
+          type: row.querySelector('.bt-type').value,
+          text: row.querySelector('.bt-text').value.trim(),
+          url: row.querySelector('.bt-url').value.trim(),
+        })).filter((b) => b.text);
         try {
           await api('/templates', { method: 'POST', body: {
             name: m.querySelector('#tp-name').value.trim(),
             category: m.querySelector('#tp-cat').value,
             language: m.querySelector('#tp-lang').value.trim() || 'en',
             body: m.querySelector('#tp-body').value.trim(),
+            header_image_url: m.querySelector('#tp-image').value.trim() || undefined,
+            buttons,
           } });
           m.remove(); renderRoute();
         } catch (err) { toast(err.message, true); }

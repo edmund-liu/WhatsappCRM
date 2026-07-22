@@ -148,6 +148,12 @@ const addColumnIfMissing = (table, column, ddl) => {
 addColumnIfMissing('users', 'skills', "skills TEXT NOT NULL DEFAULT '[]'");
 addColumnIfMissing('ai_agents', 'skills', "skills TEXT NOT NULL DEFAULT '[]'");
 addColumnIfMissing('conversations', 'required_skill', 'required_skill TEXT');
+// Rich broadcast content: image headers, quick-reply and URL buttons.
+addColumnIfMissing('templates', 'header_image_url', 'header_image_url TEXT');
+addColumnIfMissing('templates', 'buttons', "buttons TEXT NOT NULL DEFAULT '[]'");
+addColumnIfMissing('broadcasts', 'header_image_url', 'header_image_url TEXT');
+addColumnIfMissing('messages', 'media_url', 'media_url TEXT');
+addColumnIfMissing('messages', 'buttons', "buttons TEXT NOT NULL DEFAULT '[]'");
 
 // ---- Migrations for databases created before template<->Meta sync ----
 const templateCols = db.prepare('PRAGMA table_info(templates)').all().map((c) => c.name);
@@ -194,6 +200,15 @@ if (userCount === 0) {
     'Hi {{name}}, your order {{1}} has been shipped and will arrive by {{2}}.');
   insertTemplate.run('payment_reminder', 'en', 'UTILITY',
     'Hi {{name}}, this is a friendly reminder that your invoice {{1}} is due on {{2}}.');
+  db.prepare('INSERT INTO templates (name, language, category, body, header_image_url, buttons) VALUES (?, ?, ?, ?, ?, ?)').run(
+    'summer_sale', 'en', 'MARKETING',
+    'Hi {{name}}! ☀️ Our summer sale is on — up to {{1}} off everything this week only.',
+    'https://images.unsplash.com/photo-1441986300917-64674bd600d8?w=800&q=60',
+    JSON.stringify([
+      { type: 'URL', text: '🛍 Shop now', url: 'https://example.com/sale' },
+      { type: 'QUICK_REPLY', text: 'Tell me more' },
+      { type: 'QUICK_REPLY', text: 'Unsubscribe' },
+    ]));
 
   db.prepare(`INSERT INTO ai_agents (name, system_prompt) VALUES (?, ?)`).run(
     'Support Bot',

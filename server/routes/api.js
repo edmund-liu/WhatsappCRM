@@ -264,15 +264,44 @@ router.post('/conversations', (req, res) => {
 });
 
 // ---------- Templates ----------
-router.get('/templates', (req, res) => res.json(db.prepare('SELECT * FROM templates ORDER BY id DESC').all()));
+router.get('/templates', (req, res) => {
+  res.json(db.prepare('SELECT * FROM templates ORDER BY id DESC').all()
+    .map((t) => ({ ...t, buttons: JSON.parse(t.buttons || '[]') })));
+});
+
+// Up to 3 buttons: quick replies ({type:'QUICK_REPLY', text}) and links
+// ({type:'URL', text, url}), mirroring Meta's template button model.
+function validateButtons(buttons) {
+  if (buttons === undefined) return { ok: true, value: '[]' };
+  if (!Array.isArray(buttons) || buttons.length > 3) return { ok: false, error: 'buttons must be an array of at most 3' };
+  const clean = [];
+  for (const b of buttons) {
+    const text = String(b?.text || '').trim().slice(0, 25);
+    if (!text) return { ok: false, error: 'Every button needs text' };
+    if (b.type === 'URL') {
+      const url = String(b.url || '').trim();
+      if (!/^https?:\/\//.test(url)) return { ok: false, error: `Button "${text}" needs a valid http(s) URL` };
+      clean.push({ type: 'URL', text, url });
+    } else {
+      clean.push({ type: 'QUICK_REPLY', text });
+    }
+  }
+  return { ok: true, value: JSON.stringify(clean) };
+}
 
 router.post('/templates', (req, res) => {
-  const { name, language, category, body } = req.body || {};
+  const { name, language, category, body, header_image_url, buttons } = req.body || {};
   if (!name || !body) return res.status(400).json({ error: 'name and body are required' });
+  const btn = validateButtons(buttons);
+  if (!btn.ok) return res.status(400).json({ error: btn.error });
+  if (header_image_url && !/^https?:\/\//.test(header_image_url)) {
+    return res.status(400).json({ error: 'header_image_url must be a public http(s) URL' });
+  }
   try {
-    const info = db.prepare('INSERT INTO templates (name, language, category, body, param_map) VALUES (?, ?, ?, ?, ?)')
-      .run(String(name).toLowerCase().replace(/\s+/g, '_'), language || 'en', category || 'MARKETING', body,
-        JSON.stringify(computeParamMap(body)));
+    const info = db.prepare(
+      'INSERT INTO templates (name, language, category, body, param_map, header_image_url, buttons) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    ).run(String(name).toLowerCase().replace(/\s+/g, '_'), language || 'en', category || 'MARKETING', body,
+      JSON.stringify(computeParamMap(body)), header_image_url || null, btn.value);
     res.json(db.prepare('SELECT * FROM templates WHERE id = ?').get(info.lastInsertRowid));
   } catch {
     res.status(400).json({ error: 'A template with that name already exists' });
@@ -320,13 +349,16 @@ router.get('/broadcasts', (req, res) => {
 });
 
 router.post('/broadcasts', async (req, res) => {
-  const { name, template_id, variables, audience_tag, scheduled_at, send_now } = req.body || {};
+  const { name, template_id, variables, audience_tag, scheduled_at, send_now, header_image_url } = req.body || {};
   const template = db.prepare('SELECT * FROM templates WHERE id = ?').get(template_id);
   if (!name || !template) return res.status(400).json({ error: 'name and a valid template_id are required' });
+  if (header_image_url && !/^https?:\/\//.test(header_image_url)) {
+    return res.status(400).json({ error: 'header_image_url must be a public http(s) URL' });
+  }
   const status = send_now ? 'sending' : scheduled_at ? 'scheduled' : 'draft';
   const info = db.prepare(
-    'INSERT INTO broadcasts (name, template_id, variables, audience_tag, status, scheduled_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  ).run(name, template.id, JSON.stringify(variables || []), audience_tag || null, status, scheduled_at || null, req.user.id);
+    'INSERT INTO broadcasts (name, template_id, variables, audience_tag, status, scheduled_at, created_by, header_image_url) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+  ).run(name, template.id, JSON.stringify(variables || []), audience_tag || null, status, scheduled_at || null, req.user.id, header_image_url || null);
   const id = info.lastInsertRowid;
   if (send_now) {
     const run = startBroadcast(id);
