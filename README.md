@@ -9,6 +9,11 @@ assignment, staff sign-in, and Claude-powered AI agents that auto-reply and hand
   and reply to customers. Live updates via Server-Sent Events. Filters: All / Mine /
   Unassigned / AI-handled. Resolve/reopen, manual reassignment, unread counts,
   delivery/read ticks.
+- **Media messages** — paste a screenshot (Ctrl/Cmd+V) or attach an image/audio file in
+  the reply box and send it to the customer; inbound customer photos and voice notes are
+  downloaded from Meta and shown in the thread (image bubbles, inline audio player). The
+  sandbox simulator can send images and voice notes too, so the whole flow is demoable
+  offline.
 - **Skill-based routing + round-robin assignment** — admins define routing skills
   (e.g. *billing*, *shipping*, *technical*) with keywords on the Team page; each incoming
   conversation is classified against them and routed to a teammate — or AI agent — who has

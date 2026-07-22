@@ -1,9 +1,13 @@
 import { Router } from 'express';
+import express from 'express';
+import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import bcrypt from 'bcryptjs';
-import db, { getSetting, setSetting, computeParamMap } from '../db.js';
+import db, { getSetting, setSetting, computeParamMap, UPLOADS_DIR } from '../db.js';
 import { signToken, requireAuth, requireAdmin } from '../auth.js';
 import { emit, sseHandler } from '../services/events.js';
-import { sendText, isSandbox, markConversationRead, pullTemplatesFromMeta, pushTemplateToMeta } from '../services/whatsapp.js';
+import { sendText, sendMedia, isSandbox, markConversationRead, pullTemplatesFromMeta, pushTemplateToMeta } from '../services/whatsapp.js';
 import { assignConversation, addSystemNote } from '../services/assignment.js';
 import { startBroadcast, broadcastStats, audienceForBroadcast } from '../services/broadcaster.js';
 import { handleInboundMessage } from '../services/inbound.js';
@@ -37,6 +41,31 @@ router.patch('/me/availability', (req, res) => {
 
 // ---------- Events (SSE) ----------
 router.get('/events', sseHandler);
+
+// ---------- Media uploads ----------
+// Raw binary body (pasted screenshots, attached images, audio files).
+const MEDIA_TYPES = {
+  'image/png': { ext: 'png', kind: 'image' },
+  'image/jpeg': { ext: 'jpg', kind: 'image' },
+  'image/webp': { ext: 'webp', kind: 'image' },
+  'image/gif': { ext: 'gif', kind: 'image' },
+  'audio/mpeg': { ext: 'mp3', kind: 'audio' },
+  'audio/ogg': { ext: 'ogg', kind: 'audio' },
+  'audio/wav': { ext: 'wav', kind: 'audio' },
+  'audio/x-wav': { ext: 'wav', kind: 'audio' },
+  'audio/webm': { ext: 'webm', kind: 'audio' },
+  'audio/mp4': { ext: 'm4a', kind: 'audio' },
+};
+
+router.post('/uploads', express.raw({ type: () => true, limit: '10mb' }), (req, res) => {
+  const mime = (req.headers['content-type'] || '').split(';')[0].trim();
+  const spec = MEDIA_TYPES[mime];
+  if (!spec) return res.status(400).json({ error: `Unsupported file type "${mime}". Images (png/jpg/webp/gif) and audio (mp3/ogg/wav/m4a/webm) are allowed.` });
+  if (!req.body?.length) return res.status(400).json({ error: 'Empty upload' });
+  const name = `${Date.now().toString(36)}-${crypto.randomBytes(6).toString('hex')}.${spec.ext}`;
+  fs.writeFileSync(path.join(UPLOADS_DIR, name), req.body);
+  res.json({ url: `/uploads/${name}`, kind: spec.kind });
+});
 
 // ---------- Team (users) ----------
 router.get('/users', (req, res) => {
@@ -206,17 +235,27 @@ router.post('/conversations/:id/messages', async (req, res) => {
   const conv = db.prepare('SELECT * FROM conversations WHERE id = ?').get(req.params.id);
   if (!conv) return res.status(404).json({ error: 'Conversation not found' });
   const text = String(req.body?.text || '').trim();
-  if (!text) return res.status(400).json({ error: 'Message text is required' });
+  const mediaUrl = req.body?.media_url || null;
+  const mediaType = ['image', 'audio'].includes(req.body?.media_type) ? req.body.media_type : (mediaUrl ? 'image' : null);
+  if (!text && !mediaUrl) return res.status(400).json({ error: 'Message text or an attachment is required' });
   const contact = db.prepare('SELECT * FROM contacts WHERE id = ?').get(conv.contact_id);
   try {
-    const waMessageId = await sendText(contact.wa_id, text);
+    let waMessageId;
+    if (mediaUrl) {
+      // Relative upload paths must be absolute for Meta's servers to fetch.
+      const link = mediaUrl.startsWith('/') ? `${req.protocol}://${req.get('host')}${mediaUrl}` : mediaUrl;
+      waMessageId = await sendMedia(contact.wa_id, { type: mediaType, link, caption: text });
+    } else {
+      waMessageId = await sendText(contact.wa_id, text);
+    }
     const info = db.prepare(
-      "INSERT INTO messages (conversation_id, direction, sender_type, sender_user_id, type, body, wa_message_id, status) VALUES (?, 'out', 'agent', ?, 'text', ?, ?, 'sent')"
-    ).run(conv.id, req.user.id, text, waMessageId);
+      "INSERT INTO messages (conversation_id, direction, sender_type, sender_user_id, type, body, wa_message_id, status, media_url) VALUES (?, 'out', 'agent', ?, ?, ?, ?, 'sent', ?)"
+    ).run(conv.id, req.user.id, mediaType || 'text', text, waMessageId, mediaUrl);
+    const preview = mediaType === 'image' ? `📷 ${text || 'Photo'}` : mediaType === 'audio' ? '🎤 Voice message' : text;
     // A human replying takes the conversation over from the AI.
     db.prepare(
       "UPDATE conversations SET last_message_at = datetime('now'), last_message_preview = ?, ai_enabled = 0, assigned_user_id = COALESCE(assigned_user_id, ?) WHERE id = ?"
-    ).run(text.slice(0, 120), req.user.id, conv.id);
+    ).run(preview.slice(0, 120), req.user.id, conv.id);
     if (conv.ai_enabled) addSystemNote(conv.id, `${req.user.name} took over from AI`);
     emit('message_created', { conversation_id: conv.id });
     emit('conversation_updated', { conversation_id: conv.id });
@@ -475,13 +514,15 @@ router.get('/analytics', (req, res) => {
 // Emulates a customer sending a WhatsApp message (sandbox mode only).
 router.post('/simulator/inbound', async (req, res) => {
   if (!isSandbox()) return res.status(400).json({ error: 'Simulator is only available in sandbox mode' });
-  const { phone, name, text } = req.body || {};
-  if (!phone || !text) return res.status(400).json({ error: 'phone and text are required' });
+  const { phone, name, text, media_url, media_type } = req.body || {};
+  if (!phone || (!text && !media_url)) return res.status(400).json({ error: 'phone and text (or an attachment) are required' });
   const result = await handleInboundMessage({
     waId: phone,
     name,
-    text: String(text),
+    text: String(text || ''),
     waMessageId: 'wamid.SIM' + Date.now().toString(36),
+    type: media_url ? (media_type === 'audio' ? 'audio' : 'image') : 'text',
+    mediaUrl: media_url || null,
   });
   res.json({ ok: true, conversation_id: result.conversation.id });
 });

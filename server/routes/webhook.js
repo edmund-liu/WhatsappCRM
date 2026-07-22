@@ -3,10 +3,10 @@
 // GET  /webhook/whatsapp  -> subscription verification handshake
 // POST /webhook/whatsapp  -> inbound messages + delivery status updates
 import { Router } from 'express';
-import db, { getSetting } from '../db.js';
+import db, { getSetting, UPLOADS_DIR } from '../db.js';
 import { SERVERLESS } from '../runtime.js';
 import { handleInboundMessage } from '../services/inbound.js';
-import { applyStatusUpdate } from '../services/whatsapp.js';
+import { applyStatusUpdate, downloadMediaById } from '../services/whatsapp.js';
 
 const router = Router();
 
@@ -42,18 +42,32 @@ router.post('/whatsapp', async (req, res) => {
         for (const c of value.contacts || []) contactNames[c.wa_id] = c.profile?.name;
 
         for (const msg of value.messages || []) {
+          // Media messages (images, voice notes, video, documents) carry a
+          // Meta media ID — download the file so the inbox can show it.
+          const mediaMsg = msg.image || msg.audio || msg.video || msg.document || msg.sticker;
+          const mediaKind = msg.image || msg.sticker ? 'image' : msg.audio ? 'audio' : msg.video ? 'video' : msg.document ? 'document' : null;
+          let mediaUrl = null;
+          if (mediaMsg?.id) {
+            try {
+              mediaUrl = await downloadMediaById(mediaMsg.id, UPLOADS_DIR);
+            } catch (err) {
+              console.error('Inbound media download failed:', err.message);
+            }
+          }
           const text =
             msg.text?.body ??
+            mediaMsg?.caption ??
             msg.button?.text ??
             msg.interactive?.button_reply?.title ??
             msg.interactive?.list_reply?.title ??
-            `[${msg.type} message]`;
+            (mediaKind ? '' : `[${msg.type} message]`);
           const handling = handleInboundMessage({
             waId: msg.from,
             name: contactNames[msg.from],
             text,
             waMessageId: msg.id,
-            type: msg.type === 'text' ? 'text' : msg.type,
+            type: mediaKind || (msg.type === 'text' ? 'text' : msg.type),
+            mediaUrl,
           }).catch((err) => console.error('Inbound handling error:', err));
           if (SERVERLESS) await handling;
         }

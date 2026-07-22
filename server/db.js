@@ -19,6 +19,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // there and reseeds on cold start; use a persistent host for real deployments.
 const DATA_DIR = process.env.DATA_DIR
   || (process.env.VERCEL ? '/tmp/whatsappcrm-data' : path.join(__dirname, '..', 'data'));
+export const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
+fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const db = new DatabaseSync(path.join(DATA_DIR, 'crm.sqlite'));

@@ -237,22 +237,60 @@
         <div class="sub">Sends an inbound WhatsApp message through the sandbox webhook — watch it hit the inbox, round-robin and AI auto-reply.</div>
         <label class="field">Phone <input class="input" id="sim-phone" value="${esc(state.simPhone)}" /></label>
         <label class="field">Name <input class="input" id="sim-name" value="${esc(state.simName)}" /></label>
-        <label class="field">Message <textarea class="input" id="sim-text" rows="2" placeholder="e.g. Hi, where is my order?"></textarea></label>
+        <label class="field">Message <textarea class="input" id="sim-text" rows="2" placeholder="Type, or paste an image…"></textarea></label>
+        <div id="sim-chip"></div>
+        <div class="form-row" style="margin-bottom:10px">
+          <button class="btn small secondary" id="sim-attach" type="button">🖼 Attach image</button>
+          <button class="btn small secondary" id="sim-voice" type="button">🎤 Send voice note</button>
+        </div>
+        <input type="file" id="sim-file" accept="image/png,image/jpeg,image/webp,image/gif" hidden />
         <button class="btn" style="width:100%" id="sim-send">Send as customer</button>
       </div>`;
-    document.getElementById('sim-send').addEventListener('click', async () => {
+
+    let simAttachment = null; // { file, previewUrl }
+    const renderSimChip = () => {
+      const chip = document.getElementById('sim-chip');
+      if (!simAttachment) { chip.innerHTML = ''; return; }
+      chip.innerHTML = `<div class="attach-chip"><img src="${simAttachment.previewUrl}" alt="" />
+        <span class="attach-name">${esc(simAttachment.file.name || 'Pasted image')}</span>
+        <button class="attach-x" id="sim-chip-x">✕</button></div>`;
+      document.getElementById('sim-chip-x').addEventListener('click', () => { simAttachment = null; renderSimChip(); });
+    };
+    const setSimAttachment = (file) => {
+      if (!file) return;
+      simAttachment = { file, previewUrl: URL.createObjectURL(file) };
+      renderSimChip();
+    };
+    document.getElementById('sim-attach').addEventListener('click', () => document.getElementById('sim-file').click());
+    document.getElementById('sim-file').addEventListener('change', (e) => { setSimAttachment(e.target.files?.[0]); e.target.value = ''; });
+    document.getElementById('sim-text').addEventListener('paste', (e) => {
+      const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith('image/'));
+      if (item) { e.preventDefault(); setSimAttachment(item.getAsFile()); }
+    });
+
+    const simSend = async (extra = {}) => {
       const phone = document.getElementById('sim-phone').value.trim();
       const name = document.getElementById('sim-name').value.trim();
       const text = document.getElementById('sim-text').value.trim();
-      if (!phone || !text) return toast('Phone and message are required', true);
+      if (!phone) return toast('Phone is required', true);
       state.simPhone = phone; state.simName = name;
       localStorage.setItem('simPhone', phone); localStorage.setItem('simName', name);
+      const body = { phone, name, text, ...extra };
       try {
-        await api('/simulator/inbound', { method: 'POST', body: { phone, name, text } });
+        if (simAttachment && !extra.media_url) {
+          const up = await uploadFile(simAttachment.file);
+          body.media_url = up.url;
+          body.media_type = up.kind;
+        }
+        if (!body.text && !body.media_url) return toast('Type a message or attach an image', true);
+        await api('/simulator/inbound', { method: 'POST', body });
         document.getElementById('sim-text').value = '';
+        simAttachment = null; renderSimChip();
         toast('Inbound message simulated');
       } catch (err) { toast(err.message, true); }
-    });
+    };
+    document.getElementById('sim-send').addEventListener('click', () => simSend());
+    document.getElementById('sim-voice').addEventListener('click', () => simSend({ media_url: '/demo-voice.wav', media_type: 'audio' }));
   }
 
   // ---------- Inbox ----------
@@ -342,29 +380,85 @@
           </div>
         </div>
         <div class="thread-msgs">
-          ${state.messages.map((m) => {
-            if (m.sender_type === 'system') return `<div class="sysnote">${esc(m.body)}</div>`;
-            const senderLabel = m.sender_type === 'ai' ? `<div class="sender ai">🤖 ${esc(m.ai_agent_name || 'AI Agent')}</div>`
-              : m.sender_type === 'broadcast' ? '<div class="sender broadcast">📣 Broadcast</div>'
-              : m.sender_type === 'agent' && m.sender_name ? `<div class="sender">${esc(m.sender_name)}</div>` : '';
-            let msgButtons = [];
-            try { msgButtons = JSON.parse(m.buttons || '[]'); } catch {}
-            return `<div class="bubble ${m.direction}">
-              ${senderLabel}
-              ${m.media_url ? `<img class="bubble-img" src="${esc(m.media_url)}" alt="" loading="lazy" onerror="this.style.display='none'" />` : ''}
-              <div>${esc(m.body)}</div>
-              ${msgButtons.length ? `<div class="bubble-btns">${msgButtons.map((b) => b.type === 'URL'
-                ? `<a class="bubble-btn" href="${esc(b.url)}" target="_blank" rel="noopener">🔗 ${esc(b.text)}</a>`
-                : `<span class="bubble-btn">↩ ${esc(b.text)}</span>`).join('')}</div>` : ''}
-              <div class="stamp">${fmtTime(m.created_at)} ${m.direction === 'out' ? ticks(m.status) : ''}</div>
-            </div>`;
-          }).join('')}
+          ${(() => {
+            let prevKey = null;
+            return state.messages.map((m) => {
+              if (m.sender_type === 'system') { prevKey = 'sys'; return `<div class="sysnote">${esc(m.body)}</div>`; }
+              const groupKey = m.direction + ':' + (m.sender_user_id || m.ai_agent_id || m.sender_type);
+              const first = groupKey !== prevKey;
+              prevKey = groupKey;
+              const senderLabel = !first ? '' :
+                m.sender_type === 'ai' ? `<div class="sender ai">🤖 ${esc(m.ai_agent_name || 'AI Agent')}</div>`
+                : m.sender_type === 'broadcast' ? '<div class="sender broadcast">📣 Broadcast</div>'
+                : m.sender_type === 'agent' && m.sender_name ? `<div class="sender">${esc(m.sender_name)}</div>` : '';
+              let msgButtons = [];
+              try { msgButtons = JSON.parse(m.buttons || '[]'); } catch { /* ignore */ }
+              const stamp = `<span class="stamp">${fmtTime(m.created_at)}${m.direction === 'out' ? ' ' + ticks(m.status) : ''}</span>`;
+              const isAudio = m.type === 'audio';
+              const media = !m.media_url ? '' : isAudio
+                ? `<div class="bubble-audio-row">🎤<audio class="bubble-audio" controls preload="metadata" src="${esc(m.media_url)}"></audio></div>`
+                : `<img class="bubble-img" src="${esc(m.media_url)}" alt="" loading="lazy" onerror="this.classList.add('broken')" />`;
+              return `<div class="bubble ${m.direction}${first ? ' first' : ''}${media && !isAudio ? ' has-img' : ''}">
+                ${senderLabel}
+                ${media}
+                <div class="msg-text">${esc(m.body)}${stamp}</div>
+                ${msgButtons.length ? `<div class="bubble-btns">${msgButtons.map((b) => b.type === 'URL'
+                  ? `<a class="bubble-btn" href="${esc(b.url)}" target="_blank" rel="noopener">🔗 ${esc(b.text)}</a>`
+                  : `<span class="bubble-btn">↩ ${esc(b.text)}</span>`).join('')}</div>` : ''}
+              </div>`;
+            }).join('');
+          })()}
         </div>
-        <div class="composer">
-          <textarea id="composer-input" rows="1" placeholder="Type a reply… (Enter to send)"></textarea>
-          <button class="btn" id="send-btn">Send ➤</button>
+        <div class="composer-wrap">
+          <div id="attach-preview"></div>
+          <div class="composer">
+            <button class="icon-btn" id="attach-btn" title="Attach an image or audio file (or paste a screenshot)">📎</button>
+            <input type="file" id="attach-input" accept="image/png,image/jpeg,image/webp,image/gif,audio/*" hidden />
+            <textarea id="composer-input" rows="1" placeholder="Type a reply, or paste a screenshot… (Enter to send)"></textarea>
+            <button class="btn send-btn" id="send-btn" title="Send">➤</button>
+          </div>
         </div>
       </div>`;
+  }
+
+  let composerAttachment = null; // { file, kind, previewUrl }
+
+  async function uploadFile(file) {
+    const res = await fetch('/api/uploads', {
+      method: 'POST',
+      headers: { 'Content-Type': file.type, Authorization: 'Bearer ' + state.token },
+      body: file,
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error || 'Upload failed');
+    return json; // { url, kind }
+  }
+
+  function renderAttachPreview() {
+    const slot = document.getElementById('attach-preview');
+    if (!slot) return;
+    if (!composerAttachment) { slot.innerHTML = ''; return; }
+    const { kind, previewUrl, file } = composerAttachment;
+    slot.innerHTML = `
+      <div class="attach-chip">
+        ${kind === 'image' ? `<img src="${previewUrl}" alt="" />` : '<span class="attach-icon">🎤</span>'}
+        <span class="attach-name">${esc(file.name || (kind === 'image' ? 'Pasted image' : 'Audio'))}</span>
+        <button class="attach-x" id="attach-remove" title="Remove">✕</button>
+      </div>`;
+    document.getElementById('attach-remove').addEventListener('click', () => {
+      if (composerAttachment?.previewUrl) URL.revokeObjectURL(composerAttachment.previewUrl);
+      composerAttachment = null;
+      renderAttachPreview();
+    });
+  }
+
+  function setComposerAttachment(file) {
+    if (!file) return;
+    const kind = file.type.startsWith('audio/') ? 'audio' : 'image';
+    if (composerAttachment?.previewUrl) URL.revokeObjectURL(composerAttachment.previewUrl);
+    composerAttachment = { file, kind, previewUrl: kind === 'image' ? URL.createObjectURL(file) : null };
+    renderAttachPreview();
+    document.getElementById('composer-input')?.focus();
   }
 
   function wireThread($main) {
@@ -372,18 +466,41 @@
     const send = async () => {
       const input = document.getElementById('composer-input');
       const text = input.value.trim();
-      if (!text) return;
-      input.value = '';
+      if (!text && !composerAttachment) return;
+      const sendBtn = document.getElementById('send-btn');
+      sendBtn.disabled = true;
       try {
-        await api(`/conversations/${c.id}/messages`, { method: 'POST', body: { text } });
+        const body = { text };
+        if (composerAttachment) {
+          const up = await uploadFile(composerAttachment.file);
+          body.media_url = up.url;
+          body.media_type = up.kind;
+        }
+        await api(`/conversations/${c.id}/messages`, { method: 'POST', body });
+        input.value = '';
+        if (composerAttachment?.previewUrl) URL.revokeObjectURL(composerAttachment.previewUrl);
+        composerAttachment = null;
         await loadMessages(c.id); await loadConversations(); renderRoute();
       } catch (err) { toast(err.message, true); }
+      finally { const b = document.getElementById('send-btn'); if (b) b.disabled = false; }
     };
     document.getElementById('send-btn').addEventListener('click', send);
-    document.getElementById('composer-input').addEventListener('keydown', (e) => {
+    const composerInput = document.getElementById('composer-input');
+    composerInput.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
     });
-    document.getElementById('composer-input').focus();
+    // Paste a screenshot / image straight into the reply box.
+    composerInput.addEventListener('paste', (e) => {
+      const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith('image/'));
+      if (item) { e.preventDefault(); setComposerAttachment(item.getAsFile()); }
+    });
+    document.getElementById('attach-btn').addEventListener('click', () => document.getElementById('attach-input').click());
+    document.getElementById('attach-input').addEventListener('change', (e) => {
+      if (e.target.files?.[0]) setComposerAttachment(e.target.files[0]);
+      e.target.value = '';
+    });
+    renderAttachPreview();
+    composerInput.focus();
 
     // Assignment dropdown
     api('/users').then((users) => {

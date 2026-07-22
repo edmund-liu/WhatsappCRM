@@ -61,6 +61,43 @@ export async function sendText(toWaId, text) {
   });
 }
 
+// Send an image or audio message. `link` must be a publicly reachable URL in
+// live mode (relative /uploads paths are resolved against the request host).
+export async function sendMedia(toWaId, { type, link, caption = '' }) {
+  if (isSandbox()) {
+    const id = fakeMessageId();
+    simulateReceipts(id);
+    return id;
+  }
+  const media = { link };
+  if (type === 'image' && caption) media.caption = caption;
+  return graphSend({
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: toWaId,
+    type,
+    [type]: media,
+  });
+}
+
+// Live mode: resolve a Meta media ID to a local file in the uploads dir.
+export async function downloadMediaById(mediaId, uploadsDir) {
+  const token = getSetting('wa_access_token');
+  if (!token) throw new Error('No access token configured');
+  const metaRes = await fetch(`https://graph.facebook.com/${GRAPH_VERSION}/${mediaId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const meta = await metaRes.json();
+  if (!metaRes.ok) throw new Error(meta.error?.message || 'Media lookup failed');
+  const fileRes = await fetch(meta.url, { headers: { Authorization: `Bearer ${token}` } });
+  if (!fileRes.ok) throw new Error(`Media download failed (${fileRes.status})`);
+  const ext = ({ 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'audio/ogg': 'ogg', 'audio/mpeg': 'mp3', 'audio/mp4': 'm4a', 'audio/amr': 'amr', 'video/mp4': 'mp4' })[meta.mime_type?.split(';')[0]] || 'bin';
+  const name = `wa-${mediaId}.${ext}`;
+  const fs = await import('fs');
+  fs.writeFileSync(`${uploadsDir}/${name}`, Buffer.from(await fileRes.arrayBuffer()));
+  return `/uploads/${name}`;
+}
+
 export async function sendTemplate(toWaId, template, bodyParams, { headerImageUrl = null } = {}) {
   if (isSandbox()) {
     const id = fakeMessageId();

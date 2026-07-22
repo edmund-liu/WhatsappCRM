@@ -39,7 +39,7 @@ async function claudeReply(agent, history, contactName) {
   if (!apiKey) return null;
   const messages = history.map((m) => ({
     role: m.direction === 'in' ? 'user' : 'assistant',
-    content: m.body,
+    content: m.body || '[media message]',
   }));
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',

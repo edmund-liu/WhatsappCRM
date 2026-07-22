@@ -5,7 +5,7 @@ import apiRouter from './routes/api.js';
 import webhookRouter from './routes/webhook.js';
 import { startScheduler } from './services/broadcaster.js';
 import { SERVERLESS } from './runtime.js';
-import './db.js';
+import { UPLOADS_DIR } from './db.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -13,6 +13,7 @@ const app = express();
 app.use(express.json({ limit: '1mb' }));
 app.use('/api', apiRouter);
 app.use('/webhook', webhookRouter);
+app.use('/uploads', express.static(UPLOADS_DIR, { maxAge: '1d' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.get('/{*splat}', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));
 

@@ -14,7 +14,7 @@ import { SERVERLESS } from '../runtime.js';
 import { roundRobinAssign, addSystemNote, detectSkill } from './assignment.js';
 import { maybeAutoReply, pickAutoAssignAgent } from './aiResponder.js';
 
-export async function handleInboundMessage({ waId, name, text, waMessageId, type = 'text' }) {
+export async function handleInboundMessage({ waId, name, text, waMessageId, type = 'text', mediaUrl = null }) {
   waId = String(waId).replace(/\D/g, '');
 
   let contact = db.prepare('SELECT * FROM contacts WHERE wa_id = ?').get(waId);
@@ -47,11 +47,12 @@ export async function handleInboundMessage({ waId, name, text, waMessageId, type
   }
 
   db.prepare(
-    "INSERT INTO messages (conversation_id, direction, sender_type, type, body, wa_message_id, status) VALUES (?, 'in', 'contact', ?, ?, ?, 'received')"
-  ).run(conversation.id, type, text, waMessageId || null);
+    "INSERT INTO messages (conversation_id, direction, sender_type, type, body, wa_message_id, status, media_url) VALUES (?, 'in', 'contact', ?, ?, ?, 'received', ?)"
+  ).run(conversation.id, type, text, waMessageId || null, mediaUrl);
+  const preview = type === 'image' ? `📷 ${text || 'Photo'}` : type === 'audio' ? '🎤 Voice message' : text;
   db.prepare(
     "UPDATE conversations SET last_message_at = datetime('now'), last_message_preview = ?, unread_count = unread_count + 1, status = CASE WHEN status = 'resolved' THEN 'open' ELSE status END WHERE id = ?"
-  ).run(text.slice(0, 120), conversation.id);
+  ).run(preview.slice(0, 120), conversation.id);
 
   emit('message_created', { conversation_id: conversation.id });
   emit('conversation_updated', { conversation_id: conversation.id });
@@ -75,7 +76,8 @@ export async function handleInboundMessage({ waId, name, text, waMessageId, type
 
   // Always-on servers fire-and-forget so webhook responses stay fast (Meta
   // requires <10s). Serverless freezes after the response, so await there.
-  const autoReply = maybeAutoReply(conversation.id, text).catch((err) => console.error('Auto-reply error:', err));
+  const aiText = text || (type === 'image' ? '[The customer sent a photo]' : type === 'audio' ? '[The customer sent a voice message]' : '[media message]');
+  const autoReply = maybeAutoReply(conversation.id, aiText).catch((err) => console.error('Auto-reply error:', err));
   if (SERVERLESS) await autoReply;
 
   return { contact, conversation };
