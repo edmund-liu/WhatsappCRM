@@ -464,7 +464,7 @@
     return (() => {
             let prevKey = null;
             return state.messages.map((m) => {
-              if (m.sender_type === 'system') {
+              if (m.sender_type === 'system' && m.type !== 'auto_reply') {
                 prevKey = 'sys';
                 if (m.body.startsWith('📋')) {
                   return `<div class="handoff-card"><div class="hc-title">📋 Handoff summary</div>${esc(m.body.replace(/^📋 Handoff summary — /, ''))}</div>`;
@@ -475,7 +475,8 @@
               const first = groupKey !== prevKey;
               prevKey = groupKey;
               const senderLabel = !first ? '' :
-                m.sender_type === 'ai' ? `<div class="sender ai">🤖 ${esc(m.ai_agent_name || 'AI Agent')}</div>`
+                m.type === 'auto_reply' ? '<div class="sender away">🕒 Auto-reply</div>'
+                : m.sender_type === 'ai' ? `<div class="sender ai">🤖 ${esc(m.ai_agent_name || 'AI Agent')}</div>`
                 : m.sender_type === 'broadcast' ? '<div class="sender broadcast">📣 Broadcast</div>'
                 : m.sender_type === 'agent' && m.sender_name ? `<div class="sender">${esc(m.sender_name)}</div>` : '';
               let msgButtons = [];
@@ -1284,8 +1285,17 @@
   }
 
   // ---------- Settings ----------
+  const TIMEZONES = [
+    'UTC', 'America/New_York', 'America/Chicago', 'America/Denver', 'America/Los_Angeles',
+    'America/Sao_Paulo', 'Europe/London', 'Europe/Paris', 'Europe/Berlin', 'Europe/Moscow',
+    'Africa/Cairo', 'Africa/Johannesburg', 'Asia/Dubai', 'Asia/Karachi', 'Asia/Kolkata',
+    'Asia/Dhaka', 'Asia/Bangkok', 'Asia/Jakarta', 'Asia/Singapore', 'Asia/Shanghai',
+    'Asia/Tokyo', 'Asia/Seoul', 'Australia/Sydney', 'Pacific/Auckland',
+  ];
+  const DAY_ORDER = [['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday'], ['sun', 'Sunday']];
+
   async function renderSettings($main) {
-    const s = await api('/settings');
+    const [s, bh, holidays] = await Promise.all([api('/settings'), api('/business-hours'), api('/holidays')]);
     $main.innerHTML = `<div class="page">
       <div class="page-header"><div><h2>Settings</h2><div class="sub">WhatsApp Cloud API & AI configuration</div></div></div>
       <div class="card">
@@ -1310,7 +1320,60 @@
           <input class="input" id="st-anthropic" type="password" placeholder="sk-ant-…" /></label>
       </div>
       <button class="btn" id="st-save">Save settings</button>
+
+      <div class="card mt">
+        <h3 style="margin-bottom:4px">Working hours</h3>
+        <div class="muted" style="margin-bottom:12px">When enabled, messages that arrive outside these hours (or on a holiday below) get the automated away reply instead of AI/staff routing.</div>
+        <label style="display:flex;gap:8px;align-items:center;margin-bottom:14px">
+          <input type="checkbox" id="bh-enabled" ${bh.enabled ? 'checked' : ''}/>
+          <b>Enable working hours</b>
+        </label>
+        <label class="field">Timezone
+          <input class="input" id="bh-tz" list="tz-list" value="${esc(bh.timezone)}" placeholder="e.g. America/New_York" />
+          <datalist id="tz-list">${TIMEZONES.map((z) => `<option value="${z}">`).join('')}</datalist>
+        </label>
+        <div class="cp-label" style="margin:14px 0 8px">Weekly schedule</div>
+        <div id="bh-schedule">
+          ${DAY_ORDER.map(([key, label]) => {
+            const slot = bh.schedule[key];
+            const open = slot?.open || '09:00';
+            const close = slot?.close || '18:00';
+            return `<div class="hours-row" data-day="${key}">
+              <label class="hours-day"><input type="checkbox" class="day-toggle" ${slot ? 'checked' : ''}/> ${label}</label>
+              <input class="input day-open" type="time" value="${open}" ${slot ? '' : 'disabled'} />
+              <span class="muted">to</span>
+              <input class="input day-close" type="time" value="${close}" ${slot ? '' : 'disabled'} />
+            </div>`;
+          }).join('')}
+        </div>
+        <label class="field mt">Away message
+          <textarea class="input" id="bh-message" rows="3">${esc(bh.awayMessage)}</textarea>
+        </label>
+        <div class="muted" style="font-size:12px;margin-bottom:10px">
+          Tokens: <span class="mono">{{name}}</span> contact's name · <span class="mono">{{reason}}</span> "outside our business hours" or "closed for X" · <span class="mono">{{next_open}}</span> e.g. "tomorrow at 9:00 AM"
+        </div>
+        <div class="cp-summary" id="bh-preview">${esc(bh.previewMessage)}</div>
+        <button class="btn mt" id="bh-save">Save working hours</button>
+      </div>
+
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div><h3>Holidays</h3><div class="muted" style="font-size:12.5px">Dates the team is fully closed, even during working hours</div></div>
+          <button class="btn small" id="new-holiday">+ Add holiday</button>
+        </div>
+        <table class="table">
+          <thead><tr><th>Date</th><th>Name</th><th></th></tr></thead>
+          <tbody>
+            ${holidays.map((h) => `<tr>
+              <td class="mono">${esc(h.date)}</td>
+              <td>${esc(h.name || '—')}</td>
+              <td style="text-align:right"><button class="btn small danger" data-holiday-del="${h.id}">Delete</button></td>
+            </tr>`).join('') || '<tr><td colspan="3" class="muted">No holidays added</td></tr>'}
+          </tbody>
+        </table>
+      </div>
     </div>`;
+
     document.getElementById('st-save').addEventListener('click', async () => {
       try {
         await api('/settings', { method: 'PUT', body: {
@@ -1324,6 +1387,52 @@
         toast('Settings saved'); renderRoute();
       } catch (err) { toast(err.message, true); }
     });
+
+    // Toggling a day enables/disables its time inputs.
+    $main.querySelectorAll('.hours-row').forEach((row) => {
+      row.querySelector('.day-toggle').addEventListener('change', (e) => {
+        row.querySelector('.day-open').disabled = !e.target.checked;
+        row.querySelector('.day-close').disabled = !e.target.checked;
+      });
+    });
+
+    document.getElementById('bh-save').addEventListener('click', async () => {
+      const schedule = {};
+      $main.querySelectorAll('.hours-row').forEach((row) => {
+        const day = row.dataset.day;
+        const on = row.querySelector('.day-toggle').checked;
+        schedule[day] = on ? { open: row.querySelector('.day-open').value, close: row.querySelector('.day-close').value } : null;
+      });
+      try {
+        await api('/business-hours', { method: 'PUT', body: {
+          enabled: document.getElementById('bh-enabled').checked,
+          timezone: document.getElementById('bh-tz').value.trim() || 'UTC',
+          schedule,
+          awayMessage: document.getElementById('bh-message').value.trim(),
+        } });
+        toast('Working hours saved'); renderRoute();
+      } catch (err) { toast(err.message, true); }
+    });
+
+    document.getElementById('new-holiday').addEventListener('click', () => {
+      const m = modal(`
+        <h3>Add holiday</h3>
+        <label class="field">Date <input class="input" id="hd-date" type="date" /></label>
+        <label class="field">Name (optional) <input class="input" id="hd-name" placeholder="e.g. Christmas Day" /></label>
+        <div class="actions"><button class="btn secondary" id="hd-cancel">Cancel</button><button class="btn" id="hd-save">Add</button></div>`);
+      m.querySelector('#hd-cancel').addEventListener('click', () => m.remove());
+      m.querySelector('#hd-save').addEventListener('click', async () => {
+        const date = m.querySelector('#hd-date').value;
+        if (!date) return toast('Pick a date', true);
+        try {
+          await api('/holidays', { method: 'POST', body: { date, name: m.querySelector('#hd-name').value.trim() } });
+          m.remove(); renderRoute();
+        } catch (err) { toast(err.message, true); }
+      });
+    });
+    $main.querySelectorAll('[data-holiday-del]').forEach((b) => b.addEventListener('click', async () => {
+      await api('/holidays/' + b.dataset.holidayDel, { method: 'DELETE' }); renderRoute();
+    }));
   }
 
   // ---------- Router ----------

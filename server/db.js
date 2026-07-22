@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS conversations (
   ai_agent_id INTEGER,
   ai_enabled INTEGER NOT NULL DEFAULT 0,
   required_skill TEXT,
+  away_notified_on TEXT,   -- business-tz date we last sent an out-of-hours reply
   unread_count INTEGER NOT NULL DEFAULT 0,
   last_message_at ${TS},
   last_message_preview TEXT,
@@ -218,6 +219,13 @@ CREATE TABLE IF NOT EXISTS skills (
   created_at ${NOW_DEFAULT}
 );
 
+CREATE TABLE IF NOT EXISTS holidays (
+  id ${ID_PK},
+  date TEXT NOT NULL UNIQUE,   -- YYYY-MM-DD in the business timezone
+  name TEXT,
+  created_at ${NOW_DEFAULT}
+);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT
@@ -240,6 +248,7 @@ if (DIALECT === 'sqlite') {
   addColumnIfMissing('broadcasts', 'header_image_url', 'header_image_url TEXT');
   addColumnIfMissing('messages', 'media_url', 'media_url TEXT');
   addColumnIfMissing('messages', 'buttons', "buttons TEXT NOT NULL DEFAULT '[]'");
+  addColumnIfMissing('conversations', 'away_notified_on', 'away_notified_on TEXT');
 }
 
 // Ordered list of placeholder tokens in a template body, e.g.

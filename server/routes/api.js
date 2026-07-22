@@ -13,6 +13,7 @@ import { startBroadcast, broadcastStats, audienceForBroadcast } from '../service
 import { handleInboundMessage } from '../services/inbound.js';
 import { getOrCreateConversation } from '../services/conversations.js';
 import { importContacts } from '../services/importer.js';
+import { getBusinessHoursConfig, setBusinessHoursConfig, computeNextOpenLabel, renderAwayMessage, DAY_KEYS } from '../services/businessHours.js';
 import { SERVERLESS } from '../runtime.js';
 
 const router = Router();
@@ -498,6 +499,63 @@ router.put('/settings', requireAdmin, async (req, res) => {
   if (wa_access_token) await setSetting('wa_access_token', wa_access_token);
   if (wa_verify_token !== undefined) await setSetting('wa_verify_token', wa_verify_token);
   if (anthropic_api_key) await setSetting('anthropic_api_key', anthropic_api_key);
+  res.json({ ok: true });
+});
+
+// ---------- Business hours & holidays ----------
+const TIME_RE = /^([01]\d|2[0-3]):([0-5]\d)$/;
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function validateSchedule(schedule) {
+  if (schedule === undefined) return { ok: true };
+  if (typeof schedule !== 'object' || schedule === null) return { ok: false, error: 'schedule must be an object' };
+  for (const day of Object.keys(schedule)) {
+    if (!DAY_KEYS.includes(day)) return { ok: false, error: `Unknown day "${day}"` };
+    const slot = schedule[day];
+    if (slot === null) continue;
+    if (!slot || !TIME_RE.test(slot.open) || !TIME_RE.test(slot.close)) {
+      return { ok: false, error: `${day}: open/close must be HH:MM (24h)` };
+    }
+  }
+  return { ok: true };
+}
+
+router.get('/business-hours', async (req, res) => {
+  const config = await getBusinessHoursConfig();
+  const nextOpenLabel = await computeNextOpenLabel(config);
+  res.json({ ...config, nextOpenLabel, previewMessage: renderAwayMessage(config.awayMessage, { name: 'Alex', reason: config.enabled ? undefined : 'outside our business hours', nextOpenLabel }) });
+});
+
+router.put('/business-hours', requireAdmin, async (req, res) => {
+  const { enabled, timezone, schedule, awayMessage } = req.body || {};
+  if (timezone !== undefined) {
+    try { new Intl.DateTimeFormat('en-US', { timeZone: timezone }); }
+    catch { return res.status(400).json({ error: `"${timezone}" is not a recognized timezone (use an IANA name like America/New_York)` }); }
+  }
+  const v = validateSchedule(schedule);
+  if (!v.ok) return res.status(400).json({ error: v.error });
+  if (awayMessage !== undefined && !String(awayMessage).trim()) return res.status(400).json({ error: 'Away message cannot be empty' });
+  await setBusinessHoursConfig({ enabled, timezone, schedule, awayMessage });
+  res.json({ ok: true });
+});
+
+router.get('/holidays', async (req, res) => {
+  res.json(await db.prepare('SELECT * FROM holidays ORDER BY date').all());
+});
+
+router.post('/holidays', requireAdmin, async (req, res) => {
+  const { date, name } = req.body || {};
+  if (!DATE_RE.test(date || '')) return res.status(400).json({ error: 'date must be in YYYY-MM-DD format' });
+  try {
+    const info = await db.prepare('INSERT INTO holidays (date, name) VALUES (?, ?)').run(date, name || null);
+    res.json(await db.prepare('SELECT * FROM holidays WHERE id = ?').get(info.lastInsertRowid));
+  } catch {
+    res.status(400).json({ error: 'A holiday is already set for that date' });
+  }
+});
+
+router.delete('/holidays/:id', requireAdmin, async (req, res) => {
+  await db.prepare('DELETE FROM holidays WHERE id = ?').run(req.params.id);
   res.json({ ok: true });
 });
 

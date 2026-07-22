@@ -36,6 +36,13 @@ assignment, staff sign-in, and Claude-powered AI agents that auto-reply and hand
   at the transfer point recapping what the customer needs and the details they gave
   (AI-written when an Anthropic key is set, digest-based otherwise). An ℹ️ contact panel
   shows the latest summary, topic, assignment, and history stats at a glance.
+- **Working hours & holidays** — configure a weekly schedule (per-day open/close times,
+  supports overnight windows) in any IANA timezone, plus a holiday calendar, from Settings.
+  When enabled, messages that arrive outside those hours or on a holiday get a
+  **configurable away reply** (tokens: `{{name}}`, `{{reason}}`, `{{next_open}}` — e.g. "back
+  tomorrow at 9:00 AM") instead of AI/round-robin routing, sent at most once per business
+  day per conversation; the conversation is still queued to a human for when hours resume.
+  Live preview while editing.
 - **Contacts & tags** — contact book with tags (used as broadcast audiences), custom
   attributes, opt-out flag. **Bulk import** from CSV or Excel (.xlsx) with a downloadable
   template: new numbers are created, existing ones have their tags merged, and a summary

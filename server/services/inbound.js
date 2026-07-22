@@ -7,12 +7,17 @@
 //      then prefer an AI agent whose skills match; otherwise round-robin to
 //      the matching staff pool (general pool as fallback).
 //   2. Existing conversations keep their owner; AI keeps replying if enabled.
+//   3. Outside configured business hours (or on a holiday): still route/queue
+//      the conversation for staff, but skip the AI and send the configurable
+//      away message instead, at most once per business day.
 import db from '../db.js';
 import { emit } from './events.js';
 import { SERVERLESS } from '../runtime.js';
 import { roundRobinAssign, addSystemNote, detectSkill } from './assignment.js';
 import { maybeAutoReply, pickAutoAssignAgent } from './aiResponder.js';
 import { getOrCreateConversation } from './conversations.js';
+import { getBusinessHoursStatus, computeNextOpenLabel, renderAwayMessage } from './businessHours.js';
+import { sendText } from './whatsapp.js';
 
 export async function handleInboundMessage({ waId, name, text, waMessageId, type = 'text', mediaUrl = null }) {
   waId = String(waId).replace(/\D/g, '');
@@ -50,21 +55,44 @@ export async function handleInboundMessage({ waId, name, text, waMessageId, type
   emit('message_created', { conversation_id: conversation.id });
   emit('conversation_updated', { conversation_id: conversation.id });
 
+  const hours = await getBusinessHoursStatus();
+  const closed = hours.enabled && !hours.withinHours;
+
   if (isNew) {
     // Skill-based routing: classify the first message, then prefer an AI
-    // agent or staff pool that has the matching skill.
+    // agent or staff pool that has the matching skill — unless we're closed,
+    // in which case a human (not the AI) should own it for when hours resume.
     const skill = await detectSkill(text);
     if (skill) {
       await db.prepare('UPDATE conversations SET required_skill = ? WHERE id = ?').run(skill, conversation.id);
       await addSystemNote(conversation.id, `🏷 Topic detected: ${skill}`);
     }
-    const aiAgent = await pickAutoAssignAgent(skill);
+    const aiAgent = closed ? null : await pickAutoAssignAgent(skill);
     if (aiAgent) {
       await db.prepare('UPDATE conversations SET ai_enabled = 1, ai_agent_id = ? WHERE id = ?').run(aiAgent.id, conversation.id);
       await addSystemNote(conversation.id, `🤖 ${aiAgent.name} picked up this conversation`);
     } else {
       await roundRobinAssign(conversation.id, skill);
     }
+  }
+
+  if (closed) {
+    // At most one away-message per business day per conversation, so a
+    // chatty customer outside hours doesn't get greeted on every message.
+    if (conversation.away_notified_on !== hours.dateStr) {
+      const nextOpenLabel = await computeNextOpenLabel(hours.config);
+      const away = renderAwayMessage(hours.config.awayMessage, { name: contact.name, reason: hours.reason, nextOpenLabel });
+      const waMessageIdOut = await sendText(waId, away);
+      await db.prepare(
+        "INSERT INTO messages (conversation_id, direction, sender_type, type, body, wa_message_id, status) VALUES (?, 'out', 'system', 'auto_reply', ?, ?, 'sent')"
+      ).run(conversation.id, away, waMessageIdOut);
+      await db.prepare('UPDATE conversations SET away_notified_on = ?, last_message_at = CURRENT_TIMESTAMP, last_message_preview = ? WHERE id = ?')
+        .run(hours.dateStr, `🕒 ${away}`.slice(0, 120), conversation.id);
+      await addSystemNote(conversation.id, hours.holidayName ? `🕒 Sent holiday auto-reply (${hours.holidayName})` : '🕒 Sent after-hours auto-reply');
+      emit('message_created', { conversation_id: conversation.id });
+      emit('conversation_updated', { conversation_id: conversation.id });
+    }
+    return { contact, conversation };
   }
 
   // Always-on servers fire-and-forget so webhook responses stay fast (Meta

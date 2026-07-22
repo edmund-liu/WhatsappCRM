@@ -118,6 +118,7 @@ label.field .input { margin-top: 5px; font-weight: 400; color: var(--text); }
 .bubble .sender { font-size: 11px; font-weight: 700; color: var(--green-dark); margin: 1px 0 2px; }
 .bubble .sender.ai { color: #6f42c1; }
 .bubble .sender.broadcast { color: #0b5ed7; }
+.bubble .sender.away { color: var(--amber); }
 .msg-text { white-space: pre-wrap; word-break: break-word; line-height: 1.35; min-width: 60px; }
 /* WhatsApp-style: timestamp floats into the last line of text */
 .bubble .stamp { float: right; margin: 9px -3px -4px 10px; font-size: 10.5px; color: rgba(17, 27, 33, 0.45); white-space: nowrap; }
@@ -132,6 +133,12 @@ label.field .input { margin-top: 5px; font-weight: 400; color: var(--text); }
 .cp-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 6px; color: var(--text); }
 .cp-row > span:first-child { color: var(--muted); }
 .cp-summary { background: #fffbea; border-radius: 8px; padding: 8px 10px; font-size: 12.5px; line-height: 1.45; color: #5c4d1a; }
+
+.hours-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border); }
+.hours-row:last-child { border-bottom: none; }
+.hours-day { display: flex; align-items: center; gap: 8px; width: 130px; flex-shrink: 0; font-size: 13.5px; }
+.hours-row .input[type="time"] { width: 120px; padding: 6px 8px; }
+.hours-row .day-open:disabled, .hours-row .day-close:disabled { opacity: .4; }
 .bubble.has-img { padding: 4px 4px 6px; max-width: min(65%, 340px); }
 .bubble.has-img .sender { padding: 1px 5px 0; }
 .bubble.has-img .msg-text { padding: 3px 5px 0; }
