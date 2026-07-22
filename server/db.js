@@ -266,6 +266,29 @@ for (const t of await db.prepare('SELECT id, body, param_map FROM templates').al
   if (map !== t.param_map) await db.prepare('UPDATE templates SET param_map = ? WHERE id = ?').run(map, t.id);
 }
 
+// One conversation per contact: heal any historical splits (databases created
+// before this rule could have several conversation rows per number) by merging
+// each contact's conversations into the earliest one, then enforce it with a
+// unique index so a number's full history always stays in a single thread.
+const dupContacts = await db.prepare(
+  'SELECT contact_id FROM conversations GROUP BY contact_id HAVING COUNT(*) > 1'
+).all();
+for (const { contact_id } of dupContacts) {
+  const convs = await db.prepare('SELECT * FROM conversations WHERE contact_id = ? ORDER BY id').all(contact_id);
+  const keep = convs[0];
+  for (const extra of convs.slice(1)) {
+    await db.prepare('UPDATE messages SET conversation_id = ? WHERE conversation_id = ?').run(keep.id, extra.id);
+  }
+  const anyOpen = convs.some((c) => c.status !== 'resolved');
+  const unread = convs.reduce((s, c) => s + (c.unread_count || 0), 0);
+  const last = await db.prepare('SELECT body, created_at FROM messages WHERE conversation_id = ? ORDER BY id DESC LIMIT 1').get(keep.id);
+  await db.prepare('UPDATE conversations SET status = ?, unread_count = ?, last_message_at = ?, last_message_preview = ? WHERE id = ?')
+    .run(anyOpen ? 'open' : keep.status, unread, last?.created_at ?? keep.last_message_at,
+      (last?.body ?? keep.last_message_preview ?? '').slice(0, 120), keep.id);
+  await db.prepare('DELETE FROM conversations WHERE contact_id = ? AND id != ?').run(contact_id, keep.id);
+}
+await db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_conv_contact_unique ON conversations(contact_id)');
+
 // ---------- Seed data (first run only) ----------
 const userCount = (await db.prepare('SELECT COUNT(*) AS c FROM users').get()).c;
 if (userCount === 0) {

@@ -12,6 +12,7 @@ import { emit } from './events.js';
 import { SERVERLESS } from '../runtime.js';
 import { roundRobinAssign, addSystemNote, detectSkill } from './assignment.js';
 import { maybeAutoReply, pickAutoAssignAgent } from './aiResponder.js';
+import { getOrCreateConversation } from './conversations.js';
 
 export async function handleInboundMessage({ waId, name, text, waMessageId, type = 'text', mediaUrl = null }) {
   waId = String(waId).replace(/\D/g, '');
@@ -26,23 +27,16 @@ export async function handleInboundMessage({ waId, name, text, waMessageId, type
   }
   await db.prepare('UPDATE contacts SET last_message_at = CURRENT_TIMESTAMP WHERE id = ?').run(contact.id);
 
-  let conversation = await db.prepare(
-    "SELECT * FROM conversations WHERE contact_id = ? AND status != 'resolved' ORDER BY id DESC LIMIT 1"
-  ).get(contact.id);
-  let isNew = false;
-  if (!conversation) {
-    // Reopen the latest resolved thread if one exists, else create fresh.
-    const previous = await db.prepare('SELECT * FROM conversations WHERE contact_id = ? ORDER BY id DESC LIMIT 1').get(contact.id);
-    if (previous) {
-      await db.prepare("UPDATE conversations SET status = 'open', assigned_user_id = NULL, ai_enabled = 0 WHERE id = ?").run(previous.id);
-      conversation = await db.prepare('SELECT * FROM conversations WHERE id = ?').get(previous.id);
-      await addSystemNote(conversation.id, 'Conversation reopened');
-      isNew = true;
-    } else {
-      const info = await db.prepare("INSERT INTO conversations (contact_id, status) VALUES (?, 'open')").run(contact.id);
-      conversation = await db.prepare('SELECT * FROM conversations WHERE id = ?').get(info.lastInsertRowid);
-      isNew = true;
-    }
+  // Always the contact's single thread — history is never split across rows.
+  const { conv, created } = await getOrCreateConversation(contact.id);
+  let conversation = conv;
+  let isNew = created;
+  if (!created && conversation.status === 'resolved') {
+    // A message after resolution reopens the same thread and re-routes it.
+    await db.prepare("UPDATE conversations SET status = 'open', assigned_user_id = NULL, ai_enabled = 0 WHERE id = ?").run(conversation.id);
+    conversation = await db.prepare('SELECT * FROM conversations WHERE id = ?').get(conversation.id);
+    await addSystemNote(conversation.id, 'Conversation reopened');
+    isNew = true;
   }
 
   await db.prepare(

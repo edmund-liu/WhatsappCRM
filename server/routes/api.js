@@ -11,6 +11,7 @@ import { sendText, sendMedia, isSandbox, markConversationRead, pullTemplatesFrom
 import { assignConversation, addSystemNote } from '../services/assignment.js';
 import { startBroadcast, broadcastStats, audienceForBroadcast } from '../services/broadcaster.js';
 import { handleInboundMessage } from '../services/inbound.js';
+import { getOrCreateConversation } from '../services/conversations.js';
 import { importContacts } from '../services/importer.js';
 import { SERVERLESS } from '../runtime.js';
 
@@ -303,17 +304,18 @@ router.patch('/conversations/:id', async (req, res) => {
   res.json({ ok: true });
 });
 
-// Start a fresh outbound conversation with a contact.
+// Open the contact's conversation (reusing the single existing thread so past
+// history is visible; reopening it if it was resolved).
 router.post('/conversations', async (req, res) => {
   const contact = await db.prepare('SELECT * FROM contacts WHERE id = ?').get(req.body?.contact_id);
   if (!contact) return res.status(404).json({ error: 'Contact not found' });
-  let conv = await db.prepare("SELECT * FROM conversations WHERE contact_id = ? AND status != 'resolved' ORDER BY id DESC LIMIT 1").get(contact.id);
-  if (!conv) {
-    const info = await db.prepare("INSERT INTO conversations (contact_id, status, assigned_user_id) VALUES (?, 'open', ?)").run(contact.id, req.user.id);
-    conv = await db.prepare('SELECT * FROM conversations WHERE id = ?').get(info.lastInsertRowid);
-    emit('conversation_updated', { conversation_id: conv.id });
+  const { conv, created } = await getOrCreateConversation(contact.id, { assignedUserId: req.user.id });
+  if (!created && conv.status === 'resolved') {
+    await db.prepare("UPDATE conversations SET status = 'open', assigned_user_id = COALESCE(assigned_user_id, ?) WHERE id = ?").run(req.user.id, conv.id);
   }
-  res.json(conv);
+  const fresh = await db.prepare('SELECT * FROM conversations WHERE id = ?').get(conv.id);
+  emit('conversation_updated', { conversation_id: conv.id });
+  res.json(fresh);
 });
 
 // ---------- Templates ----------

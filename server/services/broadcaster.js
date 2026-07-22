@@ -7,6 +7,7 @@
 import db from '../db.js';
 import { emit } from './events.js';
 import { sendTemplate, renderTemplate, buildTemplateParams } from './whatsapp.js';
+import { getOrCreateConversation } from './conversations.js';
 
 // ~6-7 msgs/sec, well under Cloud API limits. No pacing delay on serverless,
 // where the whole run must fit inside one request's execution window.
@@ -77,13 +78,11 @@ async function runBroadcast(broadcastId) {
   emit('broadcast_progress', { broadcast_id: broadcastId });
 }
 
-// Broadcast sends also appear in the contact's conversation thread.
+// Broadcast sends also appear in the contact's single conversation thread
+// (created as resolved if the contact has never had one, so it stays out of
+// the active inbox until the customer replies).
 async function recordBroadcastMessage(broadcastId, contact, renderedBody, waMessageId, { mediaUrl = null, buttons = '[]' } = {}) {
-  let conv = await db.prepare('SELECT id FROM conversations WHERE contact_id = ? ORDER BY id DESC LIMIT 1').get(contact.id);
-  if (!conv) {
-    const info = await db.prepare("INSERT INTO conversations (contact_id, status, last_message_at) VALUES (?, 'resolved', CURRENT_TIMESTAMP)").run(contact.id);
-    conv = { id: info.lastInsertRowid };
-  }
+  const { conv } = await getOrCreateConversation(contact.id, { status: 'resolved' });
   await db.prepare(
     "INSERT INTO messages (conversation_id, direction, sender_type, type, body, wa_message_id, status, media_url, buttons) VALUES (?, 'out', 'broadcast', 'template', ?, ?, 'sent', ?, ?)"
   ).run(conv.id, renderedBody, waMessageId, mediaUrl, buttons || '[]');
