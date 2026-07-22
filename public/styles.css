@@ -173,6 +173,14 @@ a.bubble-btn:hover { filter: brightness(0.97); }
 .attach-name { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .attach-x { background: none; border: none; color: var(--muted); font-size: 14px; padding: 2px 6px; border-radius: 50%; }
 .attach-x:hover { background: #e4e7eb; color: var(--danger); }
+
+.session-banner { padding: 8px 16px; font-size: 12.5px; font-weight: 600; border-bottom: 1px solid var(--border); }
+.session-banner.closed { background: #fde2e4; color: var(--danger); }
+.session-banner.warn { background: #fff3cd; color: var(--amber); }
+.template-composer { display: flex; gap: 8px; align-items: center; padding: 10px 14px; flex-wrap: wrap; }
+.tc-vars { display: flex; gap: 8px; flex: 1; flex-wrap: wrap; }
+.tc-vars .tc-var { width: auto; flex: 1; min-width: 100px; padding: 8px 10px; }
+.session-composer-blocked { padding: 12px 16px; color: var(--muted); font-size: 13px; text-align: center; }
 .empty-thread { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; color: var(--muted); gap: 8px; }
 .empty-thread .big { font-size: 44px; }
 

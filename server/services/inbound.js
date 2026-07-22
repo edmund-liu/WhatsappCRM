@@ -10,6 +10,8 @@
 //   3. Outside configured business hours (or on a holiday): still route/queue
 //      the conversation for staff, but skip the AI and send the configurable
 //      away message instead, at most once per business day.
+//   4. An exact STOP/START keyword message is handled as pure subscription
+//      housekeeping — confirmation sent, no AI/routing triggered.
 import db from '../db.js';
 import { emit } from './events.js';
 import { SERVERLESS } from '../runtime.js';
@@ -17,6 +19,7 @@ import { roundRobinAssign, addSystemNote, detectSkill } from './assignment.js';
 import { maybeAutoReply, pickAutoAssignAgent } from './aiResponder.js';
 import { getOrCreateConversation } from './conversations.js';
 import { getBusinessHoursStatus, computeNextOpenLabel, renderAwayMessage } from './businessHours.js';
+import { handleOptKeyword } from './optOut.js';
 import { sendText } from './whatsapp.js';
 
 export async function handleInboundMessage({ waId, name, text, waMessageId, type = 'text', mediaUrl = null }) {
@@ -54,6 +57,15 @@ export async function handleInboundMessage({ waId, name, text, waMessageId, type
 
   emit('message_created', { conversation_id: conversation.id });
   emit('conversation_updated', { conversation_id: conversation.id });
+
+  // STOP/START is pure subscription housekeeping — handle it and stop, no
+  // AI/routing/away-message noise for what's just an unsubscribe request.
+  const optResult = await handleOptKeyword(conversation.id, contact, text);
+  if (optResult) {
+    emit('message_created', { conversation_id: conversation.id });
+    emit('conversation_updated', { conversation_id: conversation.id });
+    return { contact, conversation };
+  }
 
   const hours = await getBusinessHoursStatus();
   const closed = hours.enabled && !hours.withinHours;

@@ -7,13 +7,15 @@ import bcrypt from 'bcryptjs';
 import db, { getSetting, setSetting, computeParamMap, UPLOADS_DIR, SQL } from '../db.js';
 import { signToken, requireAuth, requireAdmin } from '../auth.js';
 import { emit, sseHandler } from '../services/events.js';
-import { sendText, sendMedia, isSandbox, markConversationRead, pullTemplatesFromMeta, pushTemplateToMeta } from '../services/whatsapp.js';
+import { sendText, sendMedia, sendTemplate, buildTemplateParams, renderTemplate as renderTemplateBody, isSandbox, markConversationRead, pullTemplatesFromMeta, pushTemplateToMeta } from '../services/whatsapp.js';
 import { assignConversation, addSystemNote } from '../services/assignment.js';
 import { startBroadcast, broadcastStats, audienceForBroadcast } from '../services/broadcaster.js';
 import { handleInboundMessage } from '../services/inbound.js';
 import { getOrCreateConversation } from '../services/conversations.js';
 import { importContacts } from '../services/importer.js';
 import { getBusinessHoursConfig, setBusinessHoursConfig, computeNextOpenLabel, renderAwayMessage, DAY_KEYS } from '../services/businessHours.js';
+import { getSessionWindowStatus } from '../services/sessionWindow.js';
+import { getOptOutConfig, setOptOutConfig } from '../services/optOut.js';
 import { SERVERLESS } from '../runtime.js';
 
 const router = Router();
@@ -227,7 +229,8 @@ router.get('/conversations/:id', async (req, res) => {
     WHERE cv.id = ?
   `).get(req.params.id);
   if (!conv) return res.status(404).json({ error: 'Conversation not found' });
-  res.json({ ...conv, contact_tags: JSON.parse(conv.contact_tags) });
+  const session = await getSessionWindowStatus(conv.id);
+  res.json({ ...conv, contact_tags: JSON.parse(conv.contact_tags), session });
 });
 
 router.get('/conversations/:id/messages', async (req, res) => {
@@ -255,6 +258,21 @@ router.post('/conversations/:id/messages', async (req, res) => {
   const mediaType = ['image', 'audio'].includes(req.body?.media_type) ? req.body.media_type : (mediaUrl ? 'image' : null);
   if (!text && !mediaUrl) return res.status(400).json({ error: 'Message text or an attachment is required' });
   const contact = await db.prepare('SELECT * FROM contacts WHERE id = ?').get(conv.contact_id);
+
+  // Free-form messages only work within 24h of the customer's last message
+  // (or if they've never messaged at all) — WhatsApp requires an approved
+  // template to reach them outside that window. Applies in sandbox too,
+  // since it's a WhatsApp rule, not a transport detail.
+  const session = await getSessionWindowStatus(conv.id);
+  if (!session.withinWindow) {
+    return res.status(409).json({
+      error: session.reason === 'no_session'
+        ? "This customer hasn't messaged you yet, so WhatsApp only allows an approved template to reach them — send a template instead."
+        : "This customer's 24-hour session window has closed — WhatsApp only allows an approved template to reach them now. Send a template to reopen the conversation.",
+      session_expired: true,
+    });
+  }
+
   try {
     let waMessageId;
     if (mediaUrl) {
@@ -272,6 +290,35 @@ router.post('/conversations/:id/messages', async (req, res) => {
     await db.prepare(
       'UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP, last_message_preview = ?, ai_enabled = 0, assigned_user_id = COALESCE(assigned_user_id, ?) WHERE id = ?'
     ).run(preview.slice(0, 120), req.user.id, conv.id);
+    if (conv.ai_enabled) await addSystemNote(conv.id, `${req.user.name} took over from AI`);
+    emit('message_created', { conversation_id: conv.id });
+    emit('conversation_updated', { conversation_id: conv.id });
+    res.json(await db.prepare('SELECT * FROM messages WHERE id = ?').get(info.lastInsertRowid));
+  } catch (err) {
+    res.status(502).json({ error: `Send failed: ${err.message}` });
+  }
+});
+
+// Send an approved template to this conversation's contact — the one kind of
+// message WhatsApp allows regardless of the 24-hour session window, so this
+// is how an agent reopens a conversation that's gone quiet.
+router.post('/conversations/:id/send-template', async (req, res) => {
+  const conv = await db.prepare('SELECT * FROM conversations WHERE id = ?').get(req.params.id);
+  if (!conv) return res.status(404).json({ error: 'Conversation not found' });
+  const template = await db.prepare('SELECT * FROM templates WHERE id = ?').get(req.body?.template_id);
+  if (!template) return res.status(400).json({ error: 'A valid template_id is required' });
+  const contact = await db.prepare('SELECT * FROM contacts WHERE id = ?').get(conv.contact_id);
+  const variables = Array.isArray(req.body?.variables) ? req.body.variables : [];
+  try {
+    const params = buildTemplateParams(template, contact, variables);
+    const waMessageId = await sendTemplate(contact.wa_id, template, params, { headerImageUrl: template.header_image_url || null });
+    const renderedBody = renderTemplateBody(template.body, contact, variables.map((v) => renderTemplateBody(v, contact)));
+    const info = await db.prepare(
+      "INSERT INTO messages (conversation_id, direction, sender_type, sender_user_id, type, body, wa_message_id, status, media_url, buttons) VALUES (?, 'out', 'agent', ?, 'template', ?, ?, 'sent', ?, ?)"
+    ).run(conv.id, req.user.id, renderedBody, waMessageId, template.header_image_url || null, template.buttons || '[]');
+    await db.prepare(
+      'UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP, last_message_preview = ?, ai_enabled = 0, assigned_user_id = COALESCE(assigned_user_id, ?) WHERE id = ?'
+    ).run(`📄 ${renderedBody}`.slice(0, 120), req.user.id, conv.id);
     if (conv.ai_enabled) await addSystemNote(conv.id, `${req.user.name} took over from AI`);
     emit('message_created', { conversation_id: conv.id });
     emit('conversation_updated', { conversation_id: conv.id });
@@ -556,6 +603,23 @@ router.post('/holidays', requireAdmin, async (req, res) => {
 
 router.delete('/holidays/:id', requireAdmin, async (req, res) => {
   await db.prepare('DELETE FROM holidays WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+// ---------- Opt-out / opt-in compliance ----------
+router.get('/opt-out-settings', requireAdmin, async (req, res) => {
+  res.json(await getOptOutConfig());
+});
+
+router.put('/opt-out-settings', requireAdmin, async (req, res) => {
+  const { optOutKeywords, optOutMessage, optInKeywords, optInMessage } = req.body || {};
+  const cleanList = (v) => Array.isArray(v) ? v.map((k) => String(k).trim()).filter(Boolean) : undefined;
+  if (optOutMessage !== undefined && !String(optOutMessage).trim()) return res.status(400).json({ error: 'Opt-out message cannot be empty' });
+  if (optInMessage !== undefined && !String(optInMessage).trim()) return res.status(400).json({ error: 'Opt-in message cannot be empty' });
+  await setOptOutConfig({
+    optOutKeywords: cleanList(optOutKeywords), optOutMessage,
+    optInKeywords: cleanList(optInKeywords), optInMessage,
+  });
   res.json({ ok: true });
 });
 

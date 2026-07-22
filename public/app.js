@@ -338,19 +338,25 @@
 
   // Snapshots of what's on screen so background refreshes only touch the DOM
   // when data actually changed (prevents flicker and scroll jumps).
-  function takeSnapshots() {
-    state._convJson = JSON.stringify(state.conversations);
-    state._msgJson = JSON.stringify(state.messages);
-    state._metaJson = state.activeConv ? JSON.stringify([
-      state.activeConv.status, state.activeConv.assigned_user_id, state.activeConv.ai_enabled,
-      state.activeConv.ai_agent_id, state.activeConv.required_skill,
+  function metaSnapshotOf(conv) {
+    return conv ? JSON.stringify([
+      conv.status, conv.assigned_user_id, conv.ai_enabled, conv.ai_agent_id, conv.required_skill,
+      conv.session?.withinWindow, conv.session?.reason,
     ]) : '';
   }
 
+  function takeSnapshots() {
+    state._convJson = JSON.stringify(state.conversations);
+    state._msgJson = JSON.stringify(state.messages);
+    state._metaJson = metaSnapshotOf(state.activeConv);
+  }
+
   async function renderInbox($main) {
-    // Cache the team list so the action bar's assignment dropdown renders
-    // synchronously (no async fill-in flicker). Refreshed on each full render.
+    // Cache the team list and templates so the action bar / template-send
+    // fallback render synchronously (no async fill-in flicker). Refreshed on
+    // each full render.
     try { state.users = await api('/users'); } catch { state.users = state.users || []; }
+    try { state.templates = await api('/templates'); } catch { state.templates = state.templates || []; }
     await loadConversations();
     if (state.activeConvId && !state.activeConv) await loadMessages(state.activeConvId).catch(() => { state.activeConvId = null; });
     takeSnapshots();
@@ -404,10 +410,7 @@
     if (!state.activeConvId || !$main.querySelector('.thread-msgs')) return;
     try { await loadMessages(state.activeConvId); } catch { return; }
     const msgJson = JSON.stringify(state.messages);
-    const metaJson = JSON.stringify([
-      state.activeConv.status, state.activeConv.assigned_user_id, state.activeConv.ai_enabled,
-      state.activeConv.ai_agent_id, state.activeConv.required_skill,
-    ]);
+    const metaJson = metaSnapshotOf(state.activeConv);
     const msgsEl = $main.querySelector('.thread-msgs');
     if (msgsEl && msgJson !== state._msgJson) {
       state._msgJson = msgJson;
@@ -428,6 +431,13 @@
       }
       const panel = $main.querySelector('.contact-panel');
       if (panel) panel.outerHTML = renderContactPanel();
+      // Skip while the agent is actively composing, so a session-window flip
+      // never wipes an in-progress draft or attachment.
+      const composerWrap = $main.querySelector('.composer-wrap');
+      if (composerWrap && activeId !== 'composer-input' && !composerAttachment) {
+        composerWrap.outerHTML = composerHtml();
+        wireComposer($main);
+      }
     }
   }
 
@@ -457,7 +467,27 @@
               : '<button class="btn small secondary" id="reopen-btn">Reopen</button>'}
             <button class="icon-btn" id="info-toggle" title="Contact info & history">ℹ️</button>
           </div>
-        </div>`;
+        </div>
+        ${sessionBannerHtml(c.session)}`;
+  }
+
+  // WhatsApp only allows free-form replies within 24h of the customer's last
+  // message. Warn as it approaches, and block (via the composer swap below)
+  // once it's closed — this mirrors a real WhatsApp Business rule, so it
+  // applies in sandbox too.
+  function sessionBannerHtml(session) {
+    if (!session) return '';
+    if (!session.withinWindow) {
+      const text = session.reason === 'no_session'
+        ? "This customer hasn't messaged you yet — WhatsApp requires an approved template to reach them."
+        : "This customer's 24-hour reply window has closed — send an approved template to reopen the conversation.";
+      return `<div class="session-banner closed">🔒 ${text}</div>`;
+    }
+    if (session.hoursRemaining < 2) {
+      const mins = Math.round(session.hoursRemaining * 60);
+      return `<div class="session-banner warn">⏳ Reply window closes in ~${mins} min — after that you'll need a template to reach this customer.</div>`;
+    }
+    return '';
   }
 
   function messagesHtml() {
@@ -499,6 +529,8 @@
   }
 
   function composerHtml() {
+    const session = state.activeConv?.session;
+    if (session && !session.withinWindow) return templateComposerHtml();
     return `
         <div class="composer-wrap">
           <div id="attach-preview"></div>
@@ -507,6 +539,26 @@
             <input type="file" id="attach-input" accept="image/png,image/jpeg,image/webp,image/gif,audio/*" hidden />
             <textarea id="composer-input" rows="1" placeholder="Type a reply, or paste a screenshot… (Enter to send)"></textarea>
             <button class="btn send-btn" id="send-btn" title="Send">➤</button>
+          </div>
+        </div>`;
+  }
+
+  // Fallback composer shown once the 24h session window has closed: only an
+  // approved template can reach the customer, so swap the free-text box for
+  // a template picker instead of letting the agent hit a send failure.
+  function templateComposerHtml() {
+    const templates = state.templates || [];
+    if (!templates.length) {
+      return `<div class="composer-wrap"><div class="session-composer-blocked">No templates available — create one on the Templates page to reach this customer.</div></div>`;
+    }
+    return `
+        <div class="composer-wrap">
+          <div class="template-composer">
+            <select class="input" id="tc-template" style="width:auto;min-width:200px">
+              ${templates.map((t) => `<option value="${t.id}">${esc(t.name)} (${esc(t.language)})</option>`).join('')}
+            </select>
+            <div id="tc-vars" class="tc-vars"></div>
+            <button class="btn small" id="tc-send">Send template</button>
           </div>
         </div>`;
   }
@@ -637,6 +689,34 @@
 
   function wireComposer($main) {
     const c = state.activeConv;
+
+    // Session window closed: only the template-send mini-form is present.
+    if ($main.querySelector('#tc-send')) {
+      const select = $main.querySelector('#tc-template');
+      const varsWrap = $main.querySelector('#tc-vars');
+      const refreshVars = () => {
+        const t = (state.templates || []).find((x) => x.id === Number(select.value));
+        if (!t) { varsWrap.innerHTML = ''; return; }
+        const nVars = Math.max(0, ...[...t.body.matchAll(/\{\{(\d+)\}\}/g)].map((x) => Number(x[1])), 0);
+        varsWrap.innerHTML = Array.from({ length: nVars }, (_, i) =>
+          `<input class="input tc-var" placeholder="{{${i + 1}}}" />`).join('');
+      };
+      select.addEventListener('change', refreshVars);
+      refreshVars();
+      $main.querySelector('#tc-send').addEventListener('click', async () => {
+        const btn = $main.querySelector('#tc-send');
+        btn.disabled = true;
+        try {
+          const variables = [...$main.querySelectorAll('.tc-var')].map((i) => i.value);
+          await api(`/conversations/${c.id}/send-template`, { method: 'POST', body: { template_id: Number(select.value), variables } });
+          toast('Template sent');
+          await loadMessages(c.id); await loadConversations(); renderRoute();
+        } catch (err) { toast(err.message, true); }
+        finally { btn.disabled = false; }
+      });
+      return;
+    }
+
     const send = async () => {
       const input = document.getElementById('composer-input');
       const text = input.value.trim();
@@ -655,7 +735,12 @@
         if (composerAttachment?.previewUrl) URL.revokeObjectURL(composerAttachment.previewUrl);
         composerAttachment = null;
         await loadMessages(c.id); await loadConversations(); renderRoute();
-      } catch (err) { toast(err.message, true); }
+      } catch (err) {
+        // A session-window flip (customer went quiet for 24h mid-type) is
+        // reported clearly by the server — refresh so the template fallback appears.
+        toast(err.message, true);
+        if (err.message.includes('template')) { await loadMessages(c.id); renderRoute(); }
+      }
       finally { const b = document.getElementById('send-btn'); if (b) b.disabled = false; }
     };
     document.getElementById('send-btn').addEventListener('click', send);
@@ -1295,7 +1380,7 @@
   const DAY_ORDER = [['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday'], ['sun', 'Sunday']];
 
   async function renderSettings($main) {
-    const [s, bh, holidays] = await Promise.all([api('/settings'), api('/business-hours'), api('/holidays')]);
+    const [s, bh, holidays, optOut] = await Promise.all([api('/settings'), api('/business-hours'), api('/holidays'), api('/opt-out-settings')]);
     $main.innerHTML = `<div class="page">
       <div class="page-header"><div><h2>Settings</h2><div class="sub">WhatsApp Cloud API & AI configuration</div></div></div>
       <div class="card">
@@ -1372,6 +1457,20 @@
           </tbody>
         </table>
       </div>
+
+      <div class="card">
+        <h3 style="margin-bottom:4px">Compliance: opt-out / opt-in</h3>
+        <div class="muted" style="margin-bottom:12px">A message whose <i>entire</i> text exactly matches one of these keywords (case-insensitive) automatically updates subscription status and sends the confirmation below — broadcasts always skip opted-out contacts.</div>
+        <div class="form-row">
+          <label class="field">Opt-out keywords (comma separated)
+            <input class="input" id="oo-out-kw" value="${esc((optOut.optOutKeywords || []).join(', '))}" /></label>
+          <label class="field">Opt-in keywords (comma separated)
+            <input class="input" id="oo-in-kw" value="${esc((optOut.optInKeywords || []).join(', '))}" /></label>
+        </div>
+        <label class="field">Opt-out confirmation message <textarea class="input" id="oo-out-msg" rows="2">${esc(optOut.optOutMessage)}</textarea></label>
+        <label class="field">Opt-in confirmation message <textarea class="input" id="oo-in-msg" rows="2">${esc(optOut.optInMessage)}</textarea></label>
+        <button class="btn" id="oo-save">Save compliance settings</button>
+      </div>
     </div>`;
 
     document.getElementById('st-save').addEventListener('click', async () => {
@@ -1433,6 +1532,18 @@
     $main.querySelectorAll('[data-holiday-del]').forEach((b) => b.addEventListener('click', async () => {
       await api('/holidays/' + b.dataset.holidayDel, { method: 'DELETE' }); renderRoute();
     }));
+
+    document.getElementById('oo-save').addEventListener('click', async () => {
+      try {
+        await api('/opt-out-settings', { method: 'PUT', body: {
+          optOutKeywords: document.getElementById('oo-out-kw').value.split(',').map((k) => k.trim()).filter(Boolean),
+          optOutMessage: document.getElementById('oo-out-msg').value.trim(),
+          optInKeywords: document.getElementById('oo-in-kw').value.split(',').map((k) => k.trim()).filter(Boolean),
+          optInMessage: document.getElementById('oo-in-msg').value.trim(),
+        } });
+        toast('Compliance settings saved'); renderRoute();
+      } catch (err) { toast(err.message, true); }
+    });
   }
 
   // ---------- Router ----------

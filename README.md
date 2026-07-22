@@ -14,6 +14,14 @@ assignment, staff sign-in, and Claude-powered AI agents that auto-reply and hand
   downloaded from Meta and shown in the thread (image bubbles, inline audio player). The
   sandbox simulator can send images and voice notes too, so the whole flow is demoable
   offline.
+- **24-hour session window & STOP/START compliance** — WhatsApp only allows free-form
+  replies within 24 hours of the customer's last message (or never, if they haven't
+  messaged at all); this is now enforced everywhere, with a banner in the thread (closed,
+  or a "closes in ~X min" warning) and the composer swapping to a template-send picker
+  once the window closes, so agents can reopen the conversation instead of hitting a
+  silent failure. Separately, a message whose entire text exactly matches a configurable
+  keyword ("STOP", "UNSUBSCRIBE", etc.) automatically opts the contact out of broadcasts
+  with a confirmation reply — no AI/routing noise — and "START" opts back in.
 - **Skill-based routing + round-robin assignment** — admins define routing skills
   (e.g. *billing*, *shipping*, *technical*) with keywords on the Team page; each incoming
   conversation is classified against them and routed to a teammate — or AI agent — who has
