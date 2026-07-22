@@ -1,16 +1,26 @@
-import Database from 'better-sqlite3';
+// Uses Node's built-in SQLite (node:sqlite, Node >= 22.5) — no native
+// compilation, so `npm install && npm start` works on any platform.
 import bcrypt from 'bcryptjs';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 
+let DatabaseSync;
+try {
+  ({ DatabaseSync } = await import('node:sqlite'));
+} catch {
+  console.error('\nThis app needs Node.js 22.5 or newer (built-in SQLite support).');
+  console.error(`You are running Node ${process.version}. Please upgrade: https://nodejs.org\n`);
+  process.exit(1);
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
-const db = new Database(path.join(DATA_DIR, 'crm.sqlite'));
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
+const db = new DatabaseSync(path.join(DATA_DIR, 'crm.sqlite'));
+db.exec('PRAGMA journal_mode = WAL');
+db.exec('PRAGMA foreign_keys = ON');
 
 db.exec(`
 CREATE TABLE IF NOT EXISTS users (

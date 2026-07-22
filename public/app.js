@@ -23,19 +23,27 @@
   const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
   async function api(path, opts = {}) {
-    const res = await fetch('/api' + path, {
-      ...opts,
-      headers: {
-        'Content-Type': 'application/json',
-        ...(state.token ? { Authorization: 'Bearer ' + state.token } : {}),
-        ...(opts.headers || {}),
-      },
-      body: opts.body ? JSON.stringify(opts.body) : undefined,
-    });
+    let res;
+    try {
+      res = await fetch('/api' + path, {
+        ...opts,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(state.token ? { Authorization: 'Bearer ' + state.token } : {}),
+          ...(opts.headers || {}),
+        },
+        body: opts.body ? JSON.stringify(opts.body) : undefined,
+      });
+    } catch {
+      throw new Error('Cannot reach the server. Make sure it is running (npm start) and that you opened the app via http://localhost:3000 — not as a local file or through a static file server.');
+    }
     if (res.status === 401 && state.token) { logout(); throw new Error('Session expired'); }
-    const json = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(json.error || 'Request failed');
-    return json;
+    const json = await res.json().catch(() => null);
+    if (!res.ok) {
+      throw new Error(json?.error
+        || `Request failed (HTTP ${res.status}). The API did not respond as expected — make sure you are accessing the app through the Node server (npm start, http://localhost:3000), not a static file server, and check the terminal running the server for errors.`);
+    }
+    return json ?? {};
   }
 
   function toast(msg, isError = false) {

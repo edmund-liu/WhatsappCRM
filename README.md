@@ -39,10 +39,16 @@ assignment, staff sign-in, and Claude-powered AI agents that auto-reply and hand
 
 ## Quick start
 
+Requires **Node.js 22.5+** (uses Node's built-in SQLite — no native modules to compile).
+
 ```bash
 npm install
-npm start          # http://localhost:3000
+npm start          # open http://localhost:3000
 ```
+
+> Open the app through the Node server at `http://localhost:3000`. Serving `public/`
+> from a static file server (VS Code Live Server, `npx serve`, etc.) will load the page
+> but every API call — including login — will fail, because the backend isn't there.
 
 Demo accounts (seeded on first run):
 
@@ -77,8 +83,8 @@ own system prompt, model (defaults to Claude Haiku), and handoff keywords. The A
 
 ## Stack
 
-Node.js + Express + better-sqlite3 (zero external services), vanilla-JS SPA, SSE for
-real-time. Data lives in `data/crm.sqlite`.
+Node.js (22.5+) + Express + built-in `node:sqlite` (zero external services, zero native
+modules), vanilla-JS SPA, SSE for real-time. Data lives in `data/crm.sqlite`.
 
 ## Environment variables (all optional)
 
