@@ -37,7 +37,10 @@ assignment, staff sign-in, and Claude-powered AI agents that auto-reply and hand
   (AI-written when an Anthropic key is set, digest-based otherwise). An ℹ️ contact panel
   shows the latest summary, topic, assignment, and history stats at a glance.
 - **Contacts & tags** — contact book with tags (used as broadcast audiences), custom
-  attributes, opt-out flag.
+  attributes, opt-out flag. **Bulk import** from CSV or Excel (.xlsx) with a downloadable
+  template: new numbers are created, existing ones have their tags merged, and a summary
+  reports imported / updated / skipped rows. The .xlsx reader is dependency-free (parses
+  the workbook directly), so no native or flagged packages are added.
 - **Templates with Meta sync** — reusable message templates with `{{name}}` personalization
   and `{{1}}`, `{{2}}`… variables, categorized MARKETING / UTILITY / AUTHENTICATION.
   Templates sync both ways with your WhatsApp Business Account: pull the approved library

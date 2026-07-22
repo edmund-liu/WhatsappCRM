@@ -11,6 +11,7 @@ import { sendText, sendMedia, isSandbox, markConversationRead, pullTemplatesFrom
 import { assignConversation, addSystemNote } from '../services/assignment.js';
 import { startBroadcast, broadcastStats, audienceForBroadcast } from '../services/broadcaster.js';
 import { handleInboundMessage } from '../services/inbound.js';
+import { importContacts } from '../services/importer.js';
 import { SERVERLESS } from '../runtime.js';
 
 const router = Router();
@@ -170,6 +171,14 @@ router.post('/contacts', async (req, res) => {
   } catch {
     res.status(400).json({ error: 'A contact with that phone number already exists' });
   }
+});
+
+// Bulk import from a CSV or XLSX file (raw binary body).
+router.post('/contacts/import', express.raw({ type: () => true, limit: '5mb' }), async (req, res) => {
+  if (!req.body?.length) return res.status(400).json({ error: 'No file uploaded' });
+  const result = await importContacts(req.body);
+  if (result.error) return res.status(400).json(result);
+  res.json(result);
 });
 
 router.patch('/contacts/:id', async (req, res) => {

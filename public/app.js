@@ -676,13 +676,38 @@
     composerInput.focus();
   }
 
+  function showImportResult(r) {
+    const errorsHtml = r.errors?.length
+      ? `<div class="cp-label" style="margin-top:14px">Skipped rows</div>
+         <div style="max-height:180px;overflow:auto;font-size:12.5px" class="muted">
+           ${r.errors.map((e) => `<div>Row ${e.row}: ${esc(e.reason)}</div>`).join('')}
+           ${r.skipped > r.errors.length ? `<div>…and ${r.skipped - r.errors.length} more</div>` : ''}
+         </div>` : '';
+    const m = modal(`
+      <h3>Import complete</h3>
+      <div class="stat-grid" style="grid-template-columns:repeat(3,1fr);margin-bottom:8px">
+        <div class="stat"><div class="num">${r.imported}</div><div class="lbl">New</div></div>
+        <div class="stat"><div class="num">${r.updated}</div><div class="lbl">Updated</div></div>
+        <div class="stat"><div class="num">${r.skipped}</div><div class="lbl">Skipped</div></div>
+      </div>
+      <div class="muted">Processed ${r.total} row(s) from your file.</div>
+      ${errorsHtml}
+      <div class="actions"><button class="btn" id="imp-ok">Done</button></div>`);
+    m.querySelector('#imp-ok').addEventListener('click', () => m.remove());
+  }
+
   // ---------- Contacts ----------
   async function renderContacts($main) {
     const contacts = await api('/contacts');
     $main.innerHTML = `<div class="page">
       <div class="page-header">
         <div><h2>Contacts</h2><div class="sub">${contacts.length} contacts · tag them to build broadcast audiences</div></div>
-        <button class="btn" id="add-contact">+ Add contact</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn ghost" id="dl-template">⬇ Template</button>
+          <button class="btn ghost" id="import-contacts">⬆ Import CSV / Excel</button>
+          <input type="file" id="import-file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden />
+          <button class="btn" id="add-contact">+ Add contact</button>
+        </div>
       </div>
       <div class="card">
         <table class="table">
@@ -731,6 +756,45 @@
     };
 
     document.getElementById('add-contact').addEventListener('click', () => openEditor(null));
+
+    // Download a CSV template (opens in Excel/Sheets) — built client-side so
+    // it works with the auth'd session and needs no server round-trip.
+    document.getElementById('dl-template').addEventListener('click', () => {
+      const csv = [
+        'name,phone,tags',
+        'John Doe,15551234567,vip;newsletter',
+        'Jane Smith,447700900123,',
+      ].join('\r\n') + '\r\n';
+      const blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'contacts-template.csv';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    });
+
+    const importFile = document.getElementById('import-file');
+    document.getElementById('import-contacts').addEventListener('click', () => importFile.click());
+    importFile.addEventListener('change', async () => {
+      const file = importFile.files?.[0];
+      importFile.value = '';
+      if (!file) return;
+      const btn = document.getElementById('import-contacts');
+      btn.disabled = true; btn.textContent = 'Importing…';
+      try {
+        const res = await fetch('/api/contacts/import', {
+          method: 'POST',
+          headers: { 'Content-Type': file.type || 'application/octet-stream', Authorization: 'Bearer ' + state.token },
+          body: file,
+        });
+        const out = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(out.error || 'Import failed');
+        showImportResult(out);
+        renderRoute();
+      } catch (err) { toast(err.message, true); }
+      finally { const b = document.getElementById('import-contacts'); if (b) { b.disabled = false; b.textContent = '⬆ Import CSV / Excel'; } }
+    });
+
     $main.querySelectorAll('[data-edit]').forEach((b) => b.addEventListener('click', () => {
       openEditor(contacts.find((c) => c.id === Number(b.dataset.edit)));
     }));
