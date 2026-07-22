@@ -11,7 +11,7 @@
 import db from '../db.js';
 import { emit } from './events.js';
 import { SERVERLESS } from '../runtime.js';
-import { roundRobinAssign, addSystemNote } from './assignment.js';
+import { roundRobinAssign, addSystemNote, detectSkill } from './assignment.js';
 import { maybeAutoReply, pickAutoAssignAgent } from './aiResponder.js';
 
 export async function handleInboundMessage({ waId, name, text, waMessageId, type = 'text' }) {
@@ -57,12 +57,19 @@ export async function handleInboundMessage({ waId, name, text, waMessageId, type
   emit('conversation_updated', { conversation_id: conversation.id });
 
   if (isNew) {
-    const aiAgent = pickAutoAssignAgent();
+    // Skill-based routing: classify the first message, then prefer an AI
+    // agent or staff pool that has the matching skill.
+    const skill = detectSkill(text);
+    if (skill) {
+      db.prepare('UPDATE conversations SET required_skill = ? WHERE id = ?').run(skill, conversation.id);
+      addSystemNote(conversation.id, `🏷 Topic detected: ${skill}`);
+    }
+    const aiAgent = pickAutoAssignAgent(skill);
     if (aiAgent) {
       db.prepare('UPDATE conversations SET ai_enabled = 1, ai_agent_id = ? WHERE id = ?').run(aiAgent.id, conversation.id);
       addSystemNote(conversation.id, `🤖 ${aiAgent.name} picked up this conversation`);
     } else {
-      roundRobinAssign(conversation.id);
+      roundRobinAssign(conversation.id, skill);
     }
   }
 

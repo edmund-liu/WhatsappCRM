@@ -1,20 +1,44 @@
-// Round-robin assignment of conversations to staff.
+// Skill-based routing + round-robin assignment of conversations to staff.
 //
-// A persistent cursor walks the ordered list of active, available agents so
-// new conversations are distributed evenly. Admins count as assignable only
-// if they have marked themselves available.
+// Inbound messages are classified against admin-defined skills (keyword
+// matching, most hits wins). Conversations route to teammates who have the
+// required skill, with a persistent round-robin cursor per skill pool so
+// each pool is walked fairly. If no skill matches (or nobody has it), the
+// general pool of all active, available agents is used. Admins count as
+// assignable only if they have marked themselves available.
 import db, { getSetting, setSetting } from '../db.js';
 import { emit } from './events.js';
 
-export function nextAgent() {
-  const agents = db.prepare(
-    "SELECT id, name FROM users WHERE is_active = 1 AND available = 1 ORDER BY id"
+const parseSkills = (json) => { try { return JSON.parse(json || '[]'); } catch { return []; } };
+
+// Classify a message: the skill with the most keyword hits, or null.
+export function detectSkill(text) {
+  const lower = String(text).toLowerCase();
+  let best = null;
+  let bestHits = 0;
+  for (const skill of db.prepare('SELECT name, keywords FROM skills').all()) {
+    const hits = parseSkills(skill.keywords)
+      .filter((k) => k && lower.includes(String(k).toLowerCase())).length;
+    if (hits > bestHits) { best = skill.name; bestHits = hits; }
+  }
+  return best;
+}
+
+export function nextAgent(skill = null) {
+  let agents = db.prepare(
+    'SELECT id, name, skills FROM users WHERE is_active = 1 AND available = 1 ORDER BY id'
   ).all();
+  let poolKey = 'general';
+  if (skill) {
+    const skilled = agents.filter((a) => parseSkills(a.skills).includes(skill));
+    if (skilled.length) { agents = skilled; poolKey = skill; }
+  }
   if (agents.length === 0) return null;
-  const cursor = parseInt(getSetting('round_robin_cursor', '0'), 10) || 0;
+  const cursorKey = 'round_robin_cursor:' + poolKey;
+  const cursor = parseInt(getSetting(cursorKey, '0'), 10) || 0;
   const agent = agents[cursor % agents.length];
-  setSetting('round_robin_cursor', String((cursor + 1) % agents.length));
-  return agent;
+  setSetting(cursorKey, String((cursor + 1) % agents.length));
+  return { ...agent, poolKey };
 }
 
 export function assignConversation(conversationId, userId, { by = 'round-robin' } = {}) {
@@ -25,10 +49,11 @@ export function assignConversation(conversationId, userId, { by = 'round-robin' 
   return user;
 }
 
-export function roundRobinAssign(conversationId) {
-  const agent = nextAgent();
+export function roundRobinAssign(conversationId, skill = null) {
+  const agent = nextAgent(skill);
   if (!agent) return null;
-  assignConversation(conversationId, agent.id);
+  const by = agent.poolKey === 'general' ? 'round-robin' : `round-robin · ${agent.poolKey} skill`;
+  assignConversation(conversationId, agent.id, { by });
   return agent;
 }
 

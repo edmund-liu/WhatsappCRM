@@ -127,11 +127,27 @@ CREATE TABLE IF NOT EXISTS ai_agents (
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+CREATE TABLE IF NOT EXISTS skills (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  keywords TEXT NOT NULL DEFAULT '[]',  -- JSON array; inbound text matching these routes to this skill
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT
 );
 `);
+
+// ---- Migrations for databases created before skill-based routing ----
+const addColumnIfMissing = (table, column, ddl) => {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+};
+addColumnIfMissing('users', 'skills', "skills TEXT NOT NULL DEFAULT '[]'");
+addColumnIfMissing('ai_agents', 'skills', "skills TEXT NOT NULL DEFAULT '[]'");
+addColumnIfMissing('conversations', 'required_skill', 'required_skill TEXT');
 
 // ---- Migrations for databases created before template<->Meta sync ----
 const templateCols = db.prepare('PRAGMA table_info(templates)').all().map((c) => c.name);
@@ -186,6 +202,22 @@ if (userCount === 0) {
 
   setSetting('round_robin_cursor', '0');
   setSetting('sandbox_mode', '1');
+}
+
+// Seed routing skills once (also backfills databases created before
+// skill-based routing existed).
+if (!getSetting('skills_seeded')) {
+  if (db.prepare('SELECT COUNT(*) AS c FROM skills').get().c === 0) {
+    const insertSkill = db.prepare('INSERT INTO skills (name, keywords) VALUES (?, ?)');
+    insertSkill.run('billing', JSON.stringify(['invoice', 'payment', 'refund', 'charge', 'billing', 'charged', 'subscription']));
+    insertSkill.run('shipping', JSON.stringify(['shipping', 'delivery', 'deliver', 'track', 'shipment', 'order status', 'where is my order', 'arrived']));
+    insertSkill.run('technical', JSON.stringify(['error', 'bug', 'not working', 'broken', 'crash', 'install', 'login problem', "doesn't work"]));
+    insertSkill.run('sales', JSON.stringify(['price', 'pricing', 'buy', 'purchase', 'discount', 'quote', 'demo', 'upgrade']));
+    // Give the demo agents complementary skill sets so routing is visible.
+    db.prepare("UPDATE users SET skills = ? WHERE email = 'ava@example.com'").run(JSON.stringify(['billing', 'sales']));
+    db.prepare("UPDATE users SET skills = ? WHERE email = 'ben@example.com'").run(JSON.stringify(['shipping', 'technical']));
+  }
+  setSetting('skills_seeded', '1');
 }
 
 export default db;

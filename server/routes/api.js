@@ -40,16 +40,18 @@ router.get('/events', sseHandler);
 
 // ---------- Team (users) ----------
 router.get('/users', (req, res) => {
-  res.json(db.prepare('SELECT id, name, email, role, is_active, available, created_at FROM users ORDER BY id').all());
+  const rows = db.prepare('SELECT id, name, email, role, is_active, available, skills, created_at FROM users ORDER BY id').all();
+  res.json(rows.map((u) => ({ ...u, skills: JSON.parse(u.skills || '[]') })));
 });
 
 router.post('/users', requireAdmin, (req, res) => {
-  const { name, email, password, role } = req.body || {};
+  const { name, email, password, role, skills } = req.body || {};
   if (!name || !email || !password) return res.status(400).json({ error: 'name, email and password are required' });
   try {
-    const info = db.prepare('INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)')
-      .run(name, String(email).toLowerCase().trim(), bcrypt.hashSync(password, 10), role === 'admin' ? 'admin' : 'agent');
-    res.json(db.prepare('SELECT id, name, email, role, is_active, available FROM users WHERE id = ?').get(info.lastInsertRowid));
+    const info = db.prepare('INSERT INTO users (name, email, password_hash, role, skills) VALUES (?, ?, ?, ?, ?)')
+      .run(name, String(email).toLowerCase().trim(), bcrypt.hashSync(password, 10), role === 'admin' ? 'admin' : 'agent',
+        JSON.stringify(Array.isArray(skills) ? skills : []));
+    res.json(db.prepare('SELECT id, name, email, role, is_active, available, skills FROM users WHERE id = ?').get(info.lastInsertRowid));
   } catch {
     res.status(400).json({ error: 'Email already in use' });
   }
@@ -58,15 +60,61 @@ router.post('/users', requireAdmin, (req, res) => {
 router.patch('/users/:id', requireAdmin, (req, res) => {
   const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
-  const { name, role, is_active, available, password } = req.body || {};
-  db.prepare('UPDATE users SET name = ?, role = ?, is_active = ?, available = ? WHERE id = ?').run(
+  const { name, role, is_active, available, password, skills } = req.body || {};
+  db.prepare('UPDATE users SET name = ?, role = ?, is_active = ?, available = ?, skills = ? WHERE id = ?').run(
     name ?? user.name,
     role === 'admin' || role === 'agent' ? role : user.role,
     is_active === undefined ? user.is_active : (is_active ? 1 : 0),
     available === undefined ? user.available : (available ? 1 : 0),
+    Array.isArray(skills) ? JSON.stringify(skills) : user.skills,
     user.id
   );
   if (password) db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(bcrypt.hashSync(password, 10), user.id);
+  res.json({ ok: true });
+});
+
+// ---------- Routing skills ----------
+router.get('/skills', (req, res) => {
+  res.json(db.prepare('SELECT * FROM skills ORDER BY name').all()
+    .map((s) => ({ ...s, keywords: JSON.parse(s.keywords) })));
+});
+
+router.post('/skills', requireAdmin, (req, res) => {
+  const { name, keywords } = req.body || {};
+  const slug = String(name || '').toLowerCase().trim().replace(/\s+/g, '-');
+  if (!slug) return res.status(400).json({ error: 'name is required' });
+  try {
+    const info = db.prepare('INSERT INTO skills (name, keywords) VALUES (?, ?)')
+      .run(slug, JSON.stringify(Array.isArray(keywords) ? keywords : []));
+    res.json(db.prepare('SELECT * FROM skills WHERE id = ?').get(info.lastInsertRowid));
+  } catch {
+    res.status(400).json({ error: 'A skill with that name already exists' });
+  }
+});
+
+router.patch('/skills/:id', requireAdmin, (req, res) => {
+  const skill = db.prepare('SELECT * FROM skills WHERE id = ?').get(req.params.id);
+  if (!skill) return res.status(404).json({ error: 'Skill not found' });
+  const { keywords } = req.body || {};
+  db.prepare('UPDATE skills SET keywords = ? WHERE id = ?')
+    .run(Array.isArray(keywords) ? JSON.stringify(keywords) : skill.keywords, skill.id);
+  res.json({ ok: true });
+});
+
+router.delete('/skills/:id', requireAdmin, (req, res) => {
+  const skill = db.prepare('SELECT * FROM skills WHERE id = ?').get(req.params.id);
+  if (!skill) return res.status(404).json({ error: 'Skill not found' });
+  db.prepare('DELETE FROM skills WHERE id = ?').run(skill.id);
+  // Remove the skill from any user or AI agent that lists it.
+  for (const table of ['users', 'ai_agents']) {
+    for (const row of db.prepare(`SELECT id, skills FROM ${table}`).all()) {
+      const skills = JSON.parse(row.skills || '[]');
+      if (skills.includes(skill.name)) {
+        db.prepare(`UPDATE ${table} SET skills = ? WHERE id = ?`)
+          .run(JSON.stringify(skills.filter((s) => s !== skill.name)), row.id);
+      }
+    }
+  }
   res.json({ ok: true });
 });
 
@@ -310,25 +358,26 @@ router.post('/broadcasts/:id/cancel', (req, res) => {
 // ---------- AI agents ----------
 router.get('/ai-agents', (req, res) => {
   res.json(db.prepare('SELECT * FROM ai_agents ORDER BY id').all()
-    .map((a) => ({ ...a, handoff_keywords: JSON.parse(a.handoff_keywords) })));
+    .map((a) => ({ ...a, handoff_keywords: JSON.parse(a.handoff_keywords), skills: JSON.parse(a.skills || '[]') })));
 });
 
 router.post('/ai-agents', requireAdmin, (req, res) => {
-  const { name, system_prompt, model, handoff_keywords, auto_assign_new } = req.body || {};
+  const { name, system_prompt, model, handoff_keywords, auto_assign_new, skills } = req.body || {};
   if (!name || !system_prompt) return res.status(400).json({ error: 'name and system_prompt are required' });
   const info = db.prepare(
-    'INSERT INTO ai_agents (name, system_prompt, model, handoff_keywords, auto_assign_new) VALUES (?, ?, ?, ?, ?)'
+    'INSERT INTO ai_agents (name, system_prompt, model, handoff_keywords, auto_assign_new, skills) VALUES (?, ?, ?, ?, ?, ?)'
   ).run(name, system_prompt, model || 'claude-haiku-4-5-20251001',
-    JSON.stringify(Array.isArray(handoff_keywords) ? handoff_keywords : ['human', 'agent']), auto_assign_new ? 1 : 0);
+    JSON.stringify(Array.isArray(handoff_keywords) ? handoff_keywords : ['human', 'agent']), auto_assign_new ? 1 : 0,
+    JSON.stringify(Array.isArray(skills) ? skills : []));
   res.json(db.prepare('SELECT * FROM ai_agents WHERE id = ?').get(info.lastInsertRowid));
 });
 
 router.patch('/ai-agents/:id', requireAdmin, (req, res) => {
   const agent = db.prepare('SELECT * FROM ai_agents WHERE id = ?').get(req.params.id);
   if (!agent) return res.status(404).json({ error: 'AI agent not found' });
-  const { name, system_prompt, model, handoff_keywords, is_active, auto_assign_new } = req.body || {};
+  const { name, system_prompt, model, handoff_keywords, is_active, auto_assign_new, skills } = req.body || {};
   db.prepare(
-    'UPDATE ai_agents SET name = ?, system_prompt = ?, model = ?, handoff_keywords = ?, is_active = ?, auto_assign_new = ? WHERE id = ?'
+    'UPDATE ai_agents SET name = ?, system_prompt = ?, model = ?, handoff_keywords = ?, is_active = ?, auto_assign_new = ?, skills = ? WHERE id = ?'
   ).run(
     name ?? agent.name,
     system_prompt ?? agent.system_prompt,
@@ -336,6 +385,7 @@ router.patch('/ai-agents/:id', requireAdmin, (req, res) => {
     Array.isArray(handoff_keywords) ? JSON.stringify(handoff_keywords) : agent.handoff_keywords,
     is_active === undefined ? agent.is_active : (is_active ? 1 : 0),
     auto_assign_new === undefined ? agent.auto_assign_new : (auto_assign_new ? 1 : 0),
+    Array.isArray(skills) ? JSON.stringify(skills) : agent.skills,
     agent.id
   );
   res.json({ ok: true });

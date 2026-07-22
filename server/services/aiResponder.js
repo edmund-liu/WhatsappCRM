@@ -13,8 +13,18 @@ import { emit } from './events.js';
 import { sendText } from './whatsapp.js';
 import { roundRobinAssign, addSystemNote } from './assignment.js';
 
-export function pickAutoAssignAgent() {
-  return db.prepare('SELECT * FROM ai_agents WHERE is_active = 1 AND auto_assign_new = 1 ORDER BY id LIMIT 1').get();
+// Pick the AI agent for a new conversation: prefer one whose skills match the
+// detected topic, then a generalist (no skills listed), then any auto-assign
+// agent.
+export function pickAutoAssignAgent(skill = null) {
+  const agents = db.prepare('SELECT * FROM ai_agents WHERE is_active = 1 AND auto_assign_new = 1 ORDER BY id').all();
+  if (agents.length === 0) return null;
+  const skillsOf = (a) => { try { return JSON.parse(a.skills || '[]'); } catch { return []; } };
+  if (skill) {
+    const match = agents.find((a) => skillsOf(a).includes(skill));
+    if (match) return match;
+  }
+  return agents.find((a) => skillsOf(a).length === 0) || agents[0];
 }
 
 function wantsHuman(text, agent) {
@@ -77,7 +87,7 @@ async function handoffToHuman(conversation, agent, reason) {
   db.prepare('UPDATE conversations SET ai_enabled = 0 WHERE id = ?').run(conversation.id);
   addSystemNote(conversation.id, `🤖 ${agent.name} handed off to a human (${reason})`);
   if (!conversation.assigned_user_id) {
-    const human = roundRobinAssign(conversation.id);
+    const human = roundRobinAssign(conversation.id, conversation.required_skill);
     const note = human
       ? `You're being connected to ${human.name} from our team. They'll be with you shortly! 🙋`
       : "You're in the queue for our team — someone will be with you as soon as possible!";

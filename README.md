@@ -9,9 +9,12 @@ assignment, staff sign-in, and Claude-powered AI agents that auto-reply and hand
   and reply to customers. Live updates via Server-Sent Events. Filters: All / Mine /
   Unassigned / AI-handled. Resolve/reopen, manual reassignment, unread counts,
   delivery/read ticks.
-- **Round-robin assignment** — new inbound conversations are automatically distributed
-  across active, available teammates using a persistent round-robin cursor. Staff toggle
-  their availability from the sidebar; away members are skipped.
+- **Skill-based routing + round-robin assignment** — admins define routing skills
+  (e.g. *billing*, *shipping*, *technical*) with keywords on the Team page; each incoming
+  conversation is classified against them and routed to a teammate — or AI agent — who has
+  the matching skill. Distribution is round-robin *within* each skill pool (persistent
+  per-pool cursors), falling back to the general pool when no skill matches or nobody has
+  it. Staff toggle their availability from the sidebar; away members are skipped.
 - **Broadcasts** — template campaigns to all contacts or a tag segment, sent immediately or
   scheduled. Per-recipient delivery tracking (queued → sent → delivered → read / failed),
   live progress bars, cancel mid-send, opt-out respected, rate-limited sending.

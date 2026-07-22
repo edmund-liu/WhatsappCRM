@@ -291,6 +291,7 @@
                 <div class="preview">${esc(c.last_message_preview || '')}</div>
                 <div class="meta">
                   ${statusBadge(c.status)}
+                  ${c.required_skill ? `<span class="badge amber">🏷 ${esc(c.required_skill)}</span>` : ''}
                   ${c.ai_enabled ? `<span class="badge purple">🤖 ${esc(c.ai_agent_name || 'AI')}</span>` : ''}
                   ${c.assigned_name ? `<span class="badge blue">${esc(c.assigned_name)}</span>` : (!c.ai_enabled ? '<span class="badge gray">unassigned</span>' : '')}
                   ${c.unread_count ? `<span class="unread-dot">${c.unread_count}</span>` : ''}
@@ -331,6 +332,7 @@
           </div>
           <div class="actions">
             ${statusBadge(c.status)}
+            ${c.required_skill ? `<span class="badge amber">🏷 ${esc(c.required_skill)}</span>` : ''}
             ${c.ai_enabled ? `<span class="badge purple">🤖 ${esc(c.ai_agent_name)}</span>` : ''}
             <select class="input" id="assign-select" style="width:auto;padding:5px 8px"></select>
             <button class="btn small secondary" id="ai-toggle">${c.ai_enabled ? 'Disable AI' : 'Enable AI'}</button>
@@ -678,6 +680,9 @@
               <b style="font-size:16px">🤖 ${esc(a.name)}</b>
               ${a.is_active ? '<span class="badge green">active</span>' : '<span class="badge gray">disabled</span>'}
               ${a.auto_assign_new ? '<span class="badge purple">picks up new chats</span>' : ''}
+              ${(a.skills || []).length
+                ? (a.skills || []).map((s) => `<span class="badge amber">🏷 ${esc(s)}</span>`).join(' ')
+                : '<span class="badge gray">generalist</span>'}
               <div class="muted mt" style="max-width:640px;white-space:pre-wrap">${esc(a.system_prompt)}</div>
               <div class="mt">
                 <span class="muted">Model:</span> <span class="mono">${esc(a.model)}</span> ·
@@ -691,8 +696,9 @@
           </div>
         </div>`).join('') || '<div class="card muted">No AI agents yet</div>'}
       <div class="card" style="background:#fffbea">
-        💡 <b>How it works:</b> when a new customer message arrives, an active agent with “picks up new chats” answers automatically.
-        If the customer types a handoff keyword (or the AI decides it can't help), the chat is round-robin assigned to an available teammate.
+        💡 <b>How it works:</b> when a new customer message arrives, its topic is detected from the routing skills (Team page).
+        An active auto-pickup agent whose skills match the topic answers first; otherwise a generalist agent does.
+        If the customer types a handoff keyword (or the AI decides it can't help), the chat is round-robin assigned to a teammate with the matching skill (falling back to the general pool).
         A human replying always takes over from the AI. Without an Anthropic API key (Settings), a built-in rule-based responder is used so you can demo the flow.
       </div>
     </div>`;
@@ -706,6 +712,8 @@
           <label class="field">Model <input class="input" id="ag-model" value="${esc(agent?.model || 'claude-haiku-4-5-20251001')}" /></label>
           <label class="field">Handoff keywords (comma sep.) <input class="input" id="ag-keywords" value="${esc((agent?.handoff_keywords || ['human', 'agent']).join(', '))}" /></label>
         </div>
+        <label class="field">Skills (comma separated — leave empty for a generalist that handles any topic)
+          <input class="input" id="ag-skills" value="${esc((agent?.skills || []).join(', '))}" placeholder="billing, shipping" /></label>
         <label style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
           <input type="checkbox" id="ag-auto" ${agent ? (agent.auto_assign_new ? 'checked' : '') : 'checked'}/> Automatically pick up new conversations
         </label>
@@ -718,6 +726,7 @@
           model: m.querySelector('#ag-model').value.trim(),
           handoff_keywords: m.querySelector('#ag-keywords').value.split(',').map((k) => k.trim()).filter(Boolean),
           auto_assign_new: m.querySelector('#ag-auto').checked,
+          skills: m.querySelector('#ag-skills').value.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean),
         };
         try {
           if (agent) await api('/ai-agents/' + agent.id, { method: 'PATCH', body });
@@ -740,20 +749,21 @@
 
   // ---------- Team ----------
   async function renderTeam($main) {
-    const users = await api('/users');
+    const [users, skills] = await Promise.all([api('/users'), api('/skills')]);
     $main.innerHTML = `<div class="page">
       <div class="page-header">
-        <div><h2>Team</h2><div class="sub">Staff sign in to reply. New chats round-robin between active, available members.</div></div>
+        <div><h2>Team</h2><div class="sub">Staff sign in to reply. New chats route by skill, then round-robin within the matching pool.</div></div>
         <button class="btn" id="new-user">+ Add teammate</button>
       </div>
       <div class="card">
         <table class="table">
-          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Round-robin</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Skills</th><th>Status</th><th>Round-robin</th><th></th></tr></thead>
           <tbody>
             ${users.map((u) => `<tr>
               <td><span class="avatar" style="width:28px;height:28px;font-size:11px">${initials(u.name)}</span> <b>${esc(u.name)}</b></td>
               <td class="muted">${esc(u.email)}</td>
               <td><span class="badge ${u.role === 'admin' ? 'purple' : 'blue'}">${u.role}</span></td>
+              <td>${(u.skills || []).map((s) => `<span class="badge amber">${esc(s)}</span>`).join(' ') || '<span class="muted">generalist</span>'}</td>
               <td>${u.is_active ? '<span class="badge green">active</span>' : '<span class="badge red">disabled</span>'}</td>
               <td>${u.available && u.is_active ? '<span class="badge green">✓ available</span>' : '<span class="badge gray">away</span>'}</td>
               <td style="text-align:right"><button class="btn small secondary" data-edit="${u.id}">Edit</button></td>
@@ -761,7 +771,52 @@
           </tbody>
         </table>
       </div>
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+          <div><b>Routing skills</b><div class="muted" style="font-size:12.5px">Incoming messages are matched against these keywords and routed to teammates (or AI agents) with the skill</div></div>
+          <button class="btn small" id="new-skill">+ Add skill</button>
+        </div>
+        <table class="table">
+          <thead><tr><th>Skill</th><th>Keywords</th><th>Team members</th><th></th></tr></thead>
+          <tbody>
+            ${skills.map((s) => `<tr>
+              <td><span class="badge amber">🏷 ${esc(s.name)}</span></td>
+              <td style="max-width:420px">${s.keywords.map((k) => `<span class="badge gray">${esc(k)}</span>`).join(' ')}</td>
+              <td>${users.filter((u) => (u.skills || []).includes(s.name)).map((u) => esc(u.name)).join(', ') || '<span class="muted">nobody — falls back to general pool</span>'}</td>
+              <td style="text-align:right">
+                <button class="btn small secondary" data-skill-edit="${s.id}">Edit</button>
+                <button class="btn small danger" data-skill-del="${s.id}">Delete</button>
+              </td>
+            </tr>`).join('') || '<tr><td colspan="4" class="muted">No skills defined — all chats use the general round-robin pool</td></tr>'}
+          </tbody>
+        </table>
+      </div>
     </div>`;
+
+    const openSkillEditor = (skill) => {
+      const m = modal(`
+        <h3>${skill ? 'Edit skill' : 'Add routing skill'}</h3>
+        <label class="field">Name <input class="input" id="sk-name" value="${esc(skill?.name || '')}" ${skill ? 'disabled' : ''} placeholder="billing" /></label>
+        <label class="field">Keywords (comma separated) <textarea class="input" id="sk-keywords" rows="3" placeholder="invoice, payment, refund">${esc((skill?.keywords || []).join(', '))}</textarea></label>
+        <div class="actions"><button class="btn secondary" id="sk-cancel">Cancel</button><button class="btn" id="sk-save">Save</button></div>`);
+      m.querySelector('#sk-cancel').addEventListener('click', () => m.remove());
+      m.querySelector('#sk-save').addEventListener('click', async () => {
+        const keywords = m.querySelector('#sk-keywords').value.split(',').map((k) => k.trim()).filter(Boolean);
+        try {
+          if (skill) await api('/skills/' + skill.id, { method: 'PATCH', body: { keywords } });
+          else await api('/skills', { method: 'POST', body: { name: m.querySelector('#sk-name').value.trim(), keywords } });
+          m.remove(); renderRoute();
+        } catch (err) { toast(err.message, true); }
+      });
+    };
+    document.getElementById('new-skill').addEventListener('click', () => openSkillEditor(null));
+    $main.querySelectorAll('[data-skill-edit]').forEach((b) => b.addEventListener('click', () => {
+      openSkillEditor(skills.find((s) => s.id === Number(b.dataset.skillEdit)));
+    }));
+    $main.querySelectorAll('[data-skill-del]').forEach((b) => b.addEventListener('click', async () => {
+      try { await api('/skills/' + b.dataset.skillDel, { method: 'DELETE' }); renderRoute(); }
+      catch (err) { toast(err.message, true); }
+    }));
 
     const openEditor = (user) => {
       const m = modal(`
@@ -775,12 +830,15 @@
             <option value="admin" ${user?.role === 'admin' ? 'selected' : ''}>Admin</option>
           </select>
         </label>
+        <label class="field">Skills (comma separated${skills.length ? ' — available: ' + skills.map((s) => esc(s.name)).join(', ') : ''})
+          <input class="input" id="us-skills" value="${esc((user?.skills || []).join(', '))}" placeholder="billing, shipping" /></label>
         ${user ? `
           <label style="display:flex;gap:8px;align-items:center;margin-bottom:6px"><input type="checkbox" id="us-active" ${user.is_active ? 'checked' : ''}/> Account active</label>
           <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="us-avail" ${user.available ? 'checked' : ''}/> Available for round-robin</label>` : ''}
         <div class="actions"><button class="btn secondary" id="us-cancel">Cancel</button><button class="btn" id="us-save">Save</button></div>`);
       m.querySelector('#us-cancel').addEventListener('click', () => m.remove());
       m.querySelector('#us-save').addEventListener('click', async () => {
+        const skillList = m.querySelector('#us-skills').value.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
         try {
           if (user) {
             await api('/users/' + user.id, { method: 'PATCH', body: {
@@ -789,6 +847,7 @@
               is_active: m.querySelector('#us-active').checked,
               available: m.querySelector('#us-avail').checked,
               password: m.querySelector('#us-pass').value || undefined,
+              skills: skillList,
             } });
           } else {
             await api('/users', { method: 'POST', body: {
@@ -796,6 +855,7 @@
               email: m.querySelector('#us-email').value.trim(),
               password: m.querySelector('#us-pass').value,
               role: m.querySelector('#us-role').value,
+              skills: skillList,
             } });
           }
           m.remove(); renderRoute();
