@@ -40,6 +40,9 @@ label.field .input { margin-top: 5px; font-weight: 400; color: var(--text); }
 .badge.red { background: #fde2e4; color: var(--danger); }
 .badge.blue { background: #d6e9ff; color: #0b5ed7; }
 .badge.purple { background: #ece4ff; color: #6f42c1; }
+.badge.sla-badge.pending { background: #fff3cd; color: var(--amber); }
+.badge.sla-badge.breached { background: #fde2e4; color: var(--danger); animation: sla-pulse 2s ease-in-out infinite; }
+@keyframes sla-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.55; } }
 
 /* ---------- Login ---------- */
 .login-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; background: linear-gradient(160deg, var(--green-dark) 0%, #04382f 100%); }

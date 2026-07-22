@@ -99,6 +99,8 @@
   // stream drops repeatedly we fall back to polling.
   let pollTimer = null;
   let sseFailures = 0;
+  // Keep SLA countdowns ticking in place without re-rendering anything.
+  setInterval(() => { if (state.token) tickSla(); }, 15000);
 
   function userIsTyping() {
     const el = document.activeElement;
@@ -310,6 +312,31 @@
     return { open: '<span class="badge green">open</span>', pending: '<span class="badge amber">pending</span>', resolved: '<span class="badge gray">resolved</span>' }[s] || '';
   }
 
+  // SLA badge shows a live "due in Xm" / "overdue Xm" countdown. The data
+  // attribute holds the deadline; tickSla() below updates label + color in
+  // place on a timer, so nothing has to re-render to keep the clock moving.
+  function slaBadgeHtml(sla) {
+    if (!sla?.active || !sla.dueAt) return '';
+    return `<span class="badge sla-badge" data-sla-due="${sla.dueAt}"></span>`;
+  }
+
+  function slaLabel(dueAt) {
+    const mins = Math.round((new Date(dueAt).getTime() - Date.now()) / 60000);
+    const breached = mins < 0;
+    const abs = Math.abs(mins);
+    const t = abs >= 60 ? `${Math.floor(abs / 60)}h ${abs % 60}m` : `${abs}m`;
+    return { breached, text: breached ? `⏰ Overdue ${t}` : `⏳ SLA ${t}` };
+  }
+
+  function tickSla() {
+    document.querySelectorAll('[data-sla-due]').forEach((el) => {
+      const { breached, text } = slaLabel(el.dataset.slaDue);
+      el.textContent = text;
+      el.classList.toggle('breached', breached);
+      el.classList.toggle('pending', !breached);
+    });
+  }
+
   function convListHtml() {
     return state.conversations.map((c) => `
       <button class="conv-item ${c.id === state.activeConvId ? 'active' : ''}" data-conv="${c.id}">
@@ -320,6 +347,7 @@
         <div class="preview">${esc(c.last_message_preview || '')}</div>
         <div class="meta">
           ${statusBadge(c.status)}
+          ${slaBadgeHtml(c.sla)}
           ${c.required_skill ? `<span class="badge amber">🏷 ${esc(c.required_skill)}</span>` : ''}
           ${c.ai_enabled ? `<span class="badge purple">🤖 ${esc(c.ai_agent_name || 'AI')}</span>` : ''}
           ${c.assigned_name ? `<span class="badge blue">${esc(c.assigned_name)}</span>` : (!c.ai_enabled ? '<span class="badge gray">unassigned</span>' : '')}
@@ -342,6 +370,10 @@
     return conv ? JSON.stringify([
       conv.status, conv.assigned_user_id, conv.ai_enabled, conv.ai_agent_id, conv.required_skill,
       conv.session?.withinWindow, conv.session?.reason,
+      // dueAt is stable across polls (awaiting_since + target), so it only
+      // changes when the clock starts/stops — the live countdown is handled
+      // by tickSla, not by re-rendering.
+      conv.sla?.active, conv.sla?.dueAt,
     ]) : '';
   }
 
@@ -391,6 +423,7 @@
     if (state.activeConv) { wireThreadHeader($main); wireComposer($main); }
     const scroll = $main.querySelector('.thread-msgs');
     if (scroll) scroll.scrollTop = scroll.scrollHeight;
+    tickSla();
   }
 
   // Background refresh for the inbox: updates only the regions whose data
@@ -439,6 +472,7 @@
         wireComposer($main);
       }
     }
+    tickSla();
   }
 
   // The action bar is built synchronously from the cached team list so it
@@ -455,6 +489,7 @@
           </div>
           <div class="actions">
             ${statusBadge(c.status)}
+            ${slaBadgeHtml(c.sla)}
             ${c.required_skill ? `<span class="badge amber">🏷 ${esc(c.required_skill)}</span>` : ''}
             ${c.ai_enabled ? `<span class="badge purple">🤖 ${esc(c.ai_agent_name)}</span>` : ''}
             <select class="input" id="assign-select" style="width:auto;padding:5px 8px">
@@ -1329,11 +1364,33 @@
   }
 
   // ---------- Analytics ----------
+  function fmtDuration(secs) {
+    if (secs == null) return '—';
+    if (secs < 60) return `${secs}s`;
+    const m = Math.round(secs / 60);
+    if (m < 60) return `${m}m`;
+    return `${Math.floor(m / 60)}h ${m % 60}m`;
+  }
+
   async function renderAnalytics($main) {
-    const { counters, perAgent, daily } = await api('/analytics');
+    const { counters, perAgent, daily, sla } = await api('/analytics');
     const maxDaily = Math.max(1, ...daily.map((d) => Math.max(d.inbound, d.outbound)));
+    const slaCard = sla ? `
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px">
+          <b>Service levels</b>
+          <span class="muted" style="font-size:12.5px">${sla.enabled ? `Target: respond within ${sla.target_minutes} min` : 'SLA tracking is off — enable it in Settings'}</span>
+        </div>
+        <div class="stat-grid mt">
+          <div class="stat"><div class="num">${fmtDuration(sla.avg_first_response_seconds)}</div><div class="lbl">Avg first response</div></div>
+          <div class="stat"><div class="num">${sla.within_target_pct == null ? '—' : sla.within_target_pct + '%'}</div><div class="lbl">Within target (${sla.responded_count} chats)</div></div>
+          <div class="stat"><div class="num">${fmtDuration(sla.avg_resolution_seconds)}</div><div class="lbl">Avg resolution (${sla.resolved_count})</div></div>
+          <div class="stat"><div class="num" style="color:${sla.open_breaches ? 'var(--danger)' : 'var(--green-dark)'}">${sla.open_breaches}</div><div class="lbl">Open SLA breaches</div></div>
+        </div>
+      </div>` : '';
     $main.innerHTML = `<div class="page">
       <div class="page-header"><div><h2>Analytics</h2><div class="sub">Live overview of inbox and campaign activity</div></div></div>
+      ${slaCard}
       <div class="stat-grid">
         <div class="stat"><div class="num">${counters.contacts}</div><div class="lbl">Contacts</div></div>
         <div class="stat"><div class="num">${counters.conversations_open}</div><div class="lbl">Open conversations</div></div>
@@ -1380,7 +1437,7 @@
   const DAY_ORDER = [['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday'], ['sun', 'Sunday']];
 
   async function renderSettings($main) {
-    const [s, bh, holidays, optOut] = await Promise.all([api('/settings'), api('/business-hours'), api('/holidays'), api('/opt-out-settings')]);
+    const [s, bh, holidays, optOut, slaCfg] = await Promise.all([api('/settings'), api('/business-hours'), api('/holidays'), api('/opt-out-settings'), api('/sla-settings')]);
     $main.innerHTML = `<div class="page">
       <div class="page-header"><div><h2>Settings</h2><div class="sub">WhatsApp Cloud API & AI configuration</div></div></div>
       <div class="card">
@@ -1471,6 +1528,18 @@
         <label class="field">Opt-in confirmation message <textarea class="input" id="oo-in-msg" rows="2">${esc(optOut.optInMessage)}</textarea></label>
         <button class="btn" id="oo-save">Save compliance settings</button>
       </div>
+
+      <div class="card">
+        <h3 style="margin-bottom:4px">Service level (SLA)</h3>
+        <div class="muted" style="margin-bottom:12px">Track how long customers wait for a reply. Conversations past the target show an "Overdue" badge in the inbox, and Analytics reports average first-response time and breaches.</div>
+        <label style="display:flex;gap:8px;align-items:center;margin-bottom:14px">
+          <input type="checkbox" id="sla-enabled" ${slaCfg.enabled ? 'checked' : ''}/>
+          <b>Enable SLA tracking</b>
+        </label>
+        <label class="field" style="max-width:280px">First-response target (minutes)
+          <input class="input" id="sla-minutes" type="number" min="1" value="${slaCfg.responseMinutes}" /></label>
+        <button class="btn" id="sla-save">Save SLA settings</button>
+      </div>
     </div>`;
 
     document.getElementById('st-save').addEventListener('click', async () => {
@@ -1542,6 +1611,16 @@
           optInMessage: document.getElementById('oo-in-msg').value.trim(),
         } });
         toast('Compliance settings saved'); renderRoute();
+      } catch (err) { toast(err.message, true); }
+    });
+
+    document.getElementById('sla-save').addEventListener('click', async () => {
+      try {
+        await api('/sla-settings', { method: 'PUT', body: {
+          enabled: document.getElementById('sla-enabled').checked,
+          responseMinutes: Number(document.getElementById('sla-minutes').value),
+        } });
+        toast('SLA settings saved'); renderRoute();
       } catch (err) { toast(err.message, true); }
     });
   }

@@ -12,6 +12,7 @@ import db, { getSetting } from '../db.js';
 import { emit } from './events.js';
 import { sendText } from './whatsapp.js';
 import { roundRobinAssign, addSystemNote } from './assignment.js';
+import { recordResponse } from './sla.js';
 
 // Pick the AI agent for a new conversation: prefer one whose skills match the
 // detected topic, then a generalist (no skills listed), then any auto-assign
@@ -148,6 +149,7 @@ async function sendAiText(conversation, agent, text) {
   ).run(conversation.id, agent.id, text, waMessageId);
   await db.prepare('UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP, last_message_preview = ? WHERE id = ?')
     .run(`🤖 ${text}`.slice(0, 120), conversation.id);
+  await recordResponse(conversation.id); // AI answering counts as a response
   emit('message_created', { conversation_id: conversation.id });
 }
 

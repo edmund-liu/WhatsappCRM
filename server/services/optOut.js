@@ -8,6 +8,7 @@
 import db, { getSetting, setSetting } from '../db.js';
 import { sendText } from './whatsapp.js';
 import { addSystemNote } from './assignment.js';
+import { recordResponse } from './sla.js';
 
 const DEFAULT_OPTOUT_KEYWORDS = ['stop', 'unsubscribe', 'opt out', 'cancel'];
 const DEFAULT_OPTIN_KEYWORDS = ['start', 'subscribe', 'opt in'];
@@ -63,6 +64,7 @@ async function sendAndLog(conversationId, contact, message, note) {
   ).run(conversationId, message, waMessageId);
   await db.prepare("UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP, last_message_preview = ? WHERE id = ?")
     .run(`🚫 ${message}`.slice(0, 120), conversationId);
+  await recordResponse(conversationId, { countAsFirstResponse: false });
   await addSystemNote(conversationId, note);
 }
 

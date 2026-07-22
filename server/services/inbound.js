@@ -20,6 +20,7 @@ import { maybeAutoReply, pickAutoAssignAgent } from './aiResponder.js';
 import { getOrCreateConversation } from './conversations.js';
 import { getBusinessHoursStatus, computeNextOpenLabel, renderAwayMessage } from './businessHours.js';
 import { handleOptKeyword } from './optOut.js';
+import { markAwaiting, recordResponse } from './sla.js';
 import { sendText } from './whatsapp.js';
 
 export async function handleInboundMessage({ waId, name, text, waMessageId, type = 'text', mediaUrl = null }) {
@@ -41,7 +42,7 @@ export async function handleInboundMessage({ waId, name, text, waMessageId, type
   let isNew = created;
   if (!created && conversation.status === 'resolved') {
     // A message after resolution reopens the same thread and re-routes it.
-    await db.prepare("UPDATE conversations SET status = 'open', assigned_user_id = NULL, ai_enabled = 0 WHERE id = ?").run(conversation.id);
+    await db.prepare("UPDATE conversations SET status = 'open', assigned_user_id = NULL, ai_enabled = 0, resolved_at = NULL WHERE id = ?").run(conversation.id);
     conversation = await db.prepare('SELECT * FROM conversations WHERE id = ?').get(conversation.id);
     await addSystemNote(conversation.id, 'Conversation reopened');
     isNew = true;
@@ -54,6 +55,8 @@ export async function handleInboundMessage({ waId, name, text, waMessageId, type
   await db.prepare(
     "UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP, last_message_preview = ?, unread_count = unread_count + 1, status = CASE WHEN status = 'resolved' THEN 'open' ELSE status END WHERE id = ?"
   ).run(preview.slice(0, 120), conversation.id);
+  // Start the SLA clock — the customer is now waiting for a response.
+  await markAwaiting(conversation.id);
 
   emit('message_created', { conversation_id: conversation.id });
   emit('conversation_updated', { conversation_id: conversation.id });
@@ -101,6 +104,9 @@ export async function handleInboundMessage({ waId, name, text, waMessageId, type
       await db.prepare('UPDATE conversations SET away_notified_on = ?, last_message_at = CURRENT_TIMESTAMP, last_message_preview = ? WHERE id = ?')
         .run(hours.dateStr, `🕒 ${away}`.slice(0, 120), conversation.id);
       await addSystemNote(conversation.id, hours.holidayName ? `🕒 Sent holiday auto-reply (${hours.holidayName})` : '🕒 Sent after-hours auto-reply');
+      // The away reply clears the SLA clock (no overnight breaches) but isn't
+      // counted as a real first response.
+      await recordResponse(conversation.id, { countAsFirstResponse: false });
       emit('message_created', { conversation_id: conversation.id });
       emit('conversation_updated', { conversation_id: conversation.id });
     }

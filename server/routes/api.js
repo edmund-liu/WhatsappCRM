@@ -16,6 +16,7 @@ import { importContacts } from '../services/importer.js';
 import { getBusinessHoursConfig, setBusinessHoursConfig, computeNextOpenLabel, renderAwayMessage, DAY_KEYS } from '../services/businessHours.js';
 import { getSessionWindowStatus } from '../services/sessionWindow.js';
 import { getOptOutConfig, setOptOutConfig } from '../services/optOut.js';
+import { getSlaConfig, setSlaConfig, slaStatusFor, recordResponse } from '../services/sla.js';
 import { SERVERLESS } from '../runtime.js';
 
 const router = Router();
@@ -216,7 +217,8 @@ router.get('/conversations', async (req, res) => {
     WHERE ${where}
     ORDER BY cv.last_message_at DESC NULLS LAST
   `).all(...params);
-  res.json(rows);
+  const slaConfig = await getSlaConfig();
+  res.json(rows.map((r) => ({ ...r, sla: slaStatusFor(r, slaConfig) })));
 });
 
 router.get('/conversations/:id', async (req, res) => {
@@ -230,7 +232,8 @@ router.get('/conversations/:id', async (req, res) => {
   `).get(req.params.id);
   if (!conv) return res.status(404).json({ error: 'Conversation not found' });
   const session = await getSessionWindowStatus(conv.id);
-  res.json({ ...conv, contact_tags: JSON.parse(conv.contact_tags), session });
+  const sla = slaStatusFor(conv, await getSlaConfig());
+  res.json({ ...conv, contact_tags: JSON.parse(conv.contact_tags), session, sla });
 });
 
 router.get('/conversations/:id/messages', async (req, res) => {
@@ -290,6 +293,7 @@ router.post('/conversations/:id/messages', async (req, res) => {
     await db.prepare(
       'UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP, last_message_preview = ?, ai_enabled = 0, assigned_user_id = COALESCE(assigned_user_id, ?) WHERE id = ?'
     ).run(preview.slice(0, 120), req.user.id, conv.id);
+    await recordResponse(conv.id); // agent reply stops the SLA clock
     if (conv.ai_enabled) await addSystemNote(conv.id, `${req.user.name} took over from AI`);
     emit('message_created', { conversation_id: conv.id });
     emit('conversation_updated', { conversation_id: conv.id });
@@ -319,6 +323,7 @@ router.post('/conversations/:id/send-template', async (req, res) => {
     await db.prepare(
       'UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP, last_message_preview = ?, ai_enabled = 0, assigned_user_id = COALESCE(assigned_user_id, ?) WHERE id = ?'
     ).run(`📄 ${renderedBody}`.slice(0, 120), req.user.id, conv.id);
+    await recordResponse(conv.id);
     if (conv.ai_enabled) await addSystemNote(conv.id, `${req.user.name} took over from AI`);
     emit('message_created', { conversation_id: conv.id });
     emit('conversation_updated', { conversation_id: conv.id });
@@ -333,7 +338,13 @@ router.patch('/conversations/:id', async (req, res) => {
   if (!conv) return res.status(404).json({ error: 'Conversation not found' });
   const { status, assigned_user_id, ai_enabled, ai_agent_id } = req.body || {};
   if (status && ['open', 'pending', 'resolved'].includes(status)) {
-    await db.prepare('UPDATE conversations SET status = ? WHERE id = ?').run(status, conv.id);
+    // Resolving stamps resolved_at (for resolution-time reporting) and stops
+    // any running SLA clock; reopening clears the stamp.
+    if (status === 'resolved') {
+      await db.prepare('UPDATE conversations SET status = ?, resolved_at = CURRENT_TIMESTAMP, awaiting_since = NULL WHERE id = ?').run(status, conv.id);
+    } else {
+      await db.prepare('UPDATE conversations SET status = ?, resolved_at = NULL WHERE id = ?').run(status, conv.id);
+    }
     await addSystemNote(conv.id, `Marked as ${status} by ${req.user.name}`);
   }
   if (assigned_user_id !== undefined) {
@@ -623,6 +634,20 @@ router.put('/opt-out-settings', requireAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- SLA settings ----------
+router.get('/sla-settings', requireAdmin, async (req, res) => {
+  res.json(await getSlaConfig());
+});
+
+router.put('/sla-settings', requireAdmin, async (req, res) => {
+  const { enabled, responseMinutes } = req.body || {};
+  if (responseMinutes !== undefined && (!Number.isFinite(Number(responseMinutes)) || Number(responseMinutes) < 1)) {
+    return res.status(400).json({ error: 'Response target must be at least 1 minute' });
+  }
+  await setSlaConfig({ enabled, responseMinutes });
+  res.json({ ok: true });
+});
+
 // ---------- Analytics ----------
 router.get('/analytics', async (req, res) => {
   const count = async (sql) => (await db.prepare(sql).get()).c;
@@ -646,7 +671,32 @@ router.get('/analytics', async (req, res) => {
     FROM messages WHERE created_at > ${SQL.ago('14 day')}
     GROUP BY ${SQL.day('created_at')} ORDER BY day
   `).all();
-  res.json({ counters, perAgent, daily });
+
+  // SLA metrics: average first-response time, % of responded conversations
+  // within target, resolution time, and currently-breaching open chats.
+  const slaConfig = await getSlaConfig();
+  const frtRow = await db.prepare('SELECT AVG(first_response_seconds) AS avg_secs, COUNT(*) AS c FROM conversations WHERE first_response_seconds IS NOT NULL').get();
+  const withinRow = await db.prepare('SELECT COUNT(*) AS c FROM conversations WHERE first_response_seconds IS NOT NULL AND first_response_seconds <= ?').get(slaConfig.responseMinutes * 60);
+  const resRow = await db.prepare(`
+    SELECT AVG((${SQL.epoch('resolved_at')} - ${SQL.epoch('created_at')})) AS avg_secs, COUNT(*) AS c
+    FROM conversations WHERE resolved_at IS NOT NULL
+  `).get();
+  // Currently open conversations past their response deadline.
+  const openBreaches = slaConfig.enabled
+    ? await count(`SELECT COUNT(*) AS c FROM conversations WHERE awaiting_since IS NOT NULL AND awaiting_since < ${SQL.ago(slaConfig.responseMinutes + ' minute')}`)
+    : 0;
+  const responded = frtRow.c || 0;
+  const sla = {
+    enabled: slaConfig.enabled,
+    target_minutes: slaConfig.responseMinutes,
+    avg_first_response_seconds: frtRow.avg_secs != null ? Math.round(frtRow.avg_secs) : null,
+    within_target_pct: responded ? Math.round((withinRow.c / responded) * 100) : null,
+    responded_count: responded,
+    avg_resolution_seconds: resRow.avg_secs != null ? Math.round(resRow.avg_secs) : null,
+    resolved_count: resRow.c || 0,
+    open_breaches: openBreaches,
+  };
+  res.json({ counters, perAgent, daily, sla });
 });
 
 // ---------- Sandbox simulator ----------

@@ -92,6 +92,8 @@ export const SQL = {
     : `datetime('now', '-${interval}')`,
   // YYYY-MM-DD day bucket for a timestamp column
   day: (col) => DIALECT === 'pg' ? `TO_CHAR(${col}::date, 'YYYY-MM-DD')` : `date(${col})`,
+  // Unix epoch seconds for a timestamp column (for duration math)
+  epoch: (col) => DIALECT === 'pg' ? `EXTRACT(EPOCH FROM ${col})` : `CAST(strftime('%s', ${col}) AS INTEGER)`,
 };
 
 // ---------- Schema ----------
@@ -132,6 +134,9 @@ CREATE TABLE IF NOT EXISTS conversations (
   ai_enabled INTEGER NOT NULL DEFAULT 0,
   required_skill TEXT,
   away_notified_on TEXT,   -- business-tz date we last sent an out-of-hours reply
+  awaiting_since ${TS},              -- when the current unanswered-customer period began (SLA clock)
+  first_response_seconds INTEGER,    -- historical: seconds to the first outbound response
+  resolved_at ${TS},                 -- when the conversation was marked resolved
   unread_count INTEGER NOT NULL DEFAULT 0,
   last_message_at ${TS},
   last_message_preview TEXT,
@@ -232,24 +237,34 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 `);
 
-// ---------- SQLite-only migrations (Postgres schemas are created complete) ----------
-if (DIALECT === 'sqlite') {
-  const addColumnIfMissing = (table, column, ddl) => {
+// ---------- Column migrations (both dialects) ----------
+// Fresh databases get every column from CREATE TABLE above, but an existing
+// database (e.g. a live Postgres on Vercel created before a feature shipped)
+// needs the new columns added. Postgres supports ADD COLUMN IF NOT EXISTS;
+// SQLite needs a PRAGMA check first.
+const addColumnIfMissing = async (table, column, ddl) => {
+  if (DIALECT === 'pg') {
+    await db.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS ${ddl}`);
+  } else {
     const cols = db._sqlite.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
     if (!cols.includes(column)) db._sqlite.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
-  };
-  addColumnIfMissing('users', 'skills', "skills TEXT NOT NULL DEFAULT '[]'");
-  addColumnIfMissing('ai_agents', 'skills', "skills TEXT NOT NULL DEFAULT '[]'");
-  addColumnIfMissing('conversations', 'required_skill', 'required_skill TEXT');
-  addColumnIfMissing('templates', 'param_map', "param_map TEXT NOT NULL DEFAULT '[]'");
-  addColumnIfMissing('templates', 'meta_id', 'meta_id TEXT');
-  addColumnIfMissing('templates', 'header_image_url', 'header_image_url TEXT');
-  addColumnIfMissing('templates', 'buttons', "buttons TEXT NOT NULL DEFAULT '[]'");
-  addColumnIfMissing('broadcasts', 'header_image_url', 'header_image_url TEXT');
-  addColumnIfMissing('messages', 'media_url', 'media_url TEXT');
-  addColumnIfMissing('messages', 'buttons', "buttons TEXT NOT NULL DEFAULT '[]'");
-  addColumnIfMissing('conversations', 'away_notified_on', 'away_notified_on TEXT');
-}
+  }
+};
+await addColumnIfMissing('users', 'skills', "skills TEXT NOT NULL DEFAULT '[]'");
+await addColumnIfMissing('ai_agents', 'skills', "skills TEXT NOT NULL DEFAULT '[]'");
+await addColumnIfMissing('conversations', 'required_skill', 'required_skill TEXT');
+await addColumnIfMissing('templates', 'param_map', "param_map TEXT NOT NULL DEFAULT '[]'");
+await addColumnIfMissing('templates', 'meta_id', 'meta_id TEXT');
+await addColumnIfMissing('templates', 'header_image_url', 'header_image_url TEXT');
+await addColumnIfMissing('templates', 'buttons', "buttons TEXT NOT NULL DEFAULT '[]'");
+await addColumnIfMissing('broadcasts', 'header_image_url', 'header_image_url TEXT');
+await addColumnIfMissing('messages', 'media_url', 'media_url TEXT');
+await addColumnIfMissing('messages', 'buttons', "buttons TEXT NOT NULL DEFAULT '[]'");
+await addColumnIfMissing('conversations', 'away_notified_on', 'away_notified_on TEXT');
+// SLA tracking
+await addColumnIfMissing('conversations', 'awaiting_since', `awaiting_since ${TS}`);
+await addColumnIfMissing('conversations', 'first_response_seconds', 'first_response_seconds INTEGER');
+await addColumnIfMissing('conversations', 'resolved_at', `resolved_at ${TS}`);
 
 // Ordered list of placeholder tokens in a template body, e.g.
 // "Hi {{name}}, order {{1}} ships {{2}}" -> ["name","1","2"]. Meta templates

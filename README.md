@@ -14,6 +14,13 @@ assignment, staff sign-in, and Claude-powered AI agents that auto-reply and hand
   downloaded from Meta and shown in the thread (image bubbles, inline audio player). The
   sandbox simulator can send images and voice notes too, so the whole flow is demoable
   offline.
+- **SLA tracking** — set a first-response target (minutes) in Settings; every conversation
+  gets a live "customer waiting" clock that starts on an inbound message and stops on any
+  reply. The inbox shows a "⏳ SLA 12m" / "⏰ Overdue 5m" badge (ticking in place, no
+  flicker), and Analytics reports average first-response time, % answered within target,
+  average resolution time, and the count of currently-breaching conversations. After-hours
+  away replies and STOP/START confirmations clear the clock without counting toward the
+  metric, so teams aren't penalized for overnight messages or automated acknowledgements.
 - **24-hour session window & STOP/START compliance** — WhatsApp only allows free-form
   replies within 24 hours of the customer's last message (or never, if they haven't
   messaged at all); this is now enforced everywhere, with a banner in the thread (closed,
