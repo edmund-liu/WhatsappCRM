@@ -24,12 +24,14 @@ import { markAwaiting, recordResponse } from './sla.js';
 import { handleSurveyReply } from './csat.js';
 import { sendText } from './whatsapp.js';
 
-export async function handleInboundMessage({ waId, name, text, waMessageId, type = 'text', mediaUrl = null }) {
-  waId = String(waId).replace(/\D/g, '');
+export async function handleInboundMessage({ waId, name, text, waMessageId, type = 'text', mediaUrl = null, channel = 'whatsapp' }) {
+  // WhatsApp ids are phone numbers (digits only); other channels (e.g. web
+  // chat) use their own opaque visitor id, so only normalize for WhatsApp.
+  waId = channel === 'whatsapp' ? String(waId).replace(/\D/g, '') : String(waId);
 
   let contact = await db.prepare('SELECT * FROM contacts WHERE wa_id = ?').get(waId);
   if (!contact) {
-    const info = await db.prepare('INSERT INTO contacts (wa_id, name) VALUES (?, ?)').run(waId, name || null);
+    const info = await db.prepare('INSERT INTO contacts (wa_id, channel, name) VALUES (?, ?, ?)').run(waId, channel, name || null);
     contact = await db.prepare('SELECT * FROM contacts WHERE id = ?').get(info.lastInsertRowid);
     emit('contact_created', { contact_id: contact.id });
   } else if (name && !contact.name) {

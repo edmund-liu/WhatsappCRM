@@ -14,6 +14,21 @@ assignment, staff sign-in, and Claude-powered AI agents that auto-reply and hand
   downloaded from Meta and shown in the thread (image bubbles, inline audio player). The
   sandbox simulator can send images and voice notes too, so the whole flow is demoable
   offline.
+- **Multi-channel (web chat)** — an embeddable web-chat widget (`/widget.js`, one script
+  tag) brings website visitors into the *same* inbox as WhatsApp, with a 💬 channel badge
+  and filter. Web-chat conversations flow through the identical pipeline — routing, AI,
+  business hours, SLA, CSAT — and skip WhatsApp-only rules (no 24h window). The channel
+  model is an abstraction, so Instagram/Messenger become adapters later. Try it at
+  `/chat-demo.html`.
+- **Custom contact fields & live data webhook** — define account fields (plan, balance,
+  order #) shown in the contact panel and fed to AI agents; optionally configure a data
+  webhook so the CRM pulls live account/order data from Shopify or any backend and both
+  agents and the AI answer from it.
+- **Canned replies, internal notes & @mentions** — shared "/shortcut" snippets in the
+  composer, team-only notes (never sent to the customer) with @mention highlighting, and an
+  "@ Me" filter that surfaces conversations where you were tagged.
+- **CSAT surveys** — send a configurable rating prompt on resolution; the customer's reply
+  is captured (with an optional comment) and reported in Analytics.
 - **SLA tracking** — set a first-response target (minutes) in Settings; every conversation
   gets a live "customer waiting" clock that starts on an inbound message and stops on any
   reply. The inbox shows a "⏳ SLA 12m" / "⏰ Overdue 5m" badge (ticking in place, no

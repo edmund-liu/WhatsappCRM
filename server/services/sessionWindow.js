@@ -11,6 +11,11 @@ import db from '../db.js';
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 
 export async function getSessionWindowStatus(conversationId) {
+  // The 24h window is a WhatsApp rule; other channels (web chat, etc.) have
+  // no such restriction, so they're always "within window".
+  const ch = await db.prepare('SELECT c.channel FROM conversations cv JOIN contacts c ON c.id = cv.contact_id WHERE cv.id = ?').get(conversationId);
+  if (ch && ch.channel && ch.channel !== 'whatsapp') return { withinWindow: true, reason: null, lastInboundAt: null, hoursRemaining: Infinity };
+
   const last = await db.prepare(
     "SELECT created_at FROM messages WHERE conversation_id = ? AND direction = 'in' ORDER BY id DESC LIMIT 1"
   ).get(conversationId);

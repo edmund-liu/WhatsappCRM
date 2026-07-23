@@ -312,6 +312,13 @@
     return { open: '<span class="badge green">open</span>', pending: '<span class="badge amber">pending</span>', resolved: '<span class="badge gray">resolved</span>' }[s] || '';
   }
 
+  // Channel indicator: WhatsApp is the default so it stays unmarked; other
+  // channels get a small prefix icon.
+  function channelIcon(channel) {
+    if (channel === 'webchat') return '<span class="ch-icon" title="Web chat">💬</span> ';
+    return '';
+  }
+
   // SLA badge shows a live "due in Xm" / "overdue Xm" countdown. The data
   // attribute holds the deadline; tickSla() below updates label + color in
   // place on a timer, so nothing has to re-render to keep the clock moving.
@@ -351,7 +358,7 @@
     return state.conversations.map((c) => `
       <button class="conv-item ${c.id === state.activeConvId ? 'active' : ''}" data-conv="${c.id}">
         <div class="top">
-          <span class="who">${esc(c.contact_name || '+' + c.wa_id)}</span>
+          <span class="who">${channelIcon(c.contact_channel)}${esc(c.contact_name || (c.contact_channel === 'webchat' ? 'Web visitor' : '+' + c.wa_id))}</span>
           <span class="when">${fmtTime(c.last_message_at)}</span>
         </div>
         <div class="preview">${esc(c.last_message_preview || '')}</div>
@@ -407,7 +414,7 @@
     if (state.activeConvId && !state.activeConv) await loadMessages(state.activeConvId).catch(() => { state.activeConvId = null; });
     takeSnapshots();
 
-    const filters = [['all', 'All'], ['mine', 'Mine'], ['unassigned', 'Unassigned'], ['ai', '🤖 AI'], ['mentions', '@ Me']];
+    const filters = [['all', 'All'], ['mine', 'Mine'], ['unassigned', 'Unassigned'], ['ai', '🤖 AI'], ['mentions', '@ Me'], ['webchat', '💬 Web']];
     $main.innerHTML = `
       <div class="inbox">
         <div class="conv-list">
@@ -499,8 +506,8 @@
         <div class="thread-header">
           <span class="avatar">${initials(c.contact_name)}</span>
           <div class="info">
-            <div class="name">${esc(c.contact_name || 'Unknown')}</div>
-            <div class="phone">+${esc(c.wa_id)} ${c.contact_tags.map((t) => `<span class="badge gray">${esc(t)}</span>`).join(' ')}</div>
+            <div class="name">${channelIcon(c.contact_channel)}${esc(c.contact_name || (c.contact_channel === 'webchat' ? 'Web visitor' : 'Unknown'))}</div>
+            <div class="phone">${c.contact_channel === 'webchat' ? '💬 Web chat' : '+' + esc(c.wa_id)} ${c.contact_tags.map((t) => `<span class="badge gray">${esc(t)}</span>`).join(' ')}</div>
           </div>
           <div class="actions">
             ${statusBadge(c.status)}

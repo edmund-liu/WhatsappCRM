@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import apiRouter from './routes/api.js';
 import webhookRouter from './routes/webhook.js';
+import chatRouter from './routes/chat.js';
 import { startScheduler } from './services/broadcaster.js';
 import { SERVERLESS } from './runtime.js';
 import { UPLOADS_DIR } from './db.js';
@@ -13,6 +14,7 @@ const app = express();
 app.use(express.json({ limit: '1mb' }));
 app.use('/api', apiRouter);
 app.use('/webhook', webhookRouter);
+app.use('/chat', chatRouter); // public web-chat channel (widget backend)
 app.use('/uploads', express.static(UPLOADS_DIR, { maxAge: '1d' }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 app.get('/{*splat}', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'index.html')));

@@ -221,6 +221,7 @@ router.get('/conversations', async (req, res) => {
   if (filter === 'mine') { where += ' AND cv.assigned_user_id = ?'; params.push(req.user.id); }
   if (filter === 'unassigned') where += ' AND cv.assigned_user_id IS NULL AND cv.ai_enabled = 0';
   if (filter === 'ai') where += ' AND cv.ai_enabled = 1';
+  if (filter === 'webchat') where += " AND c.channel = 'webchat'";
   if (filter === 'mentions') {
     // Conversations where an unresolved note @mentions the current user.
     const noteRows = await db.prepare("SELECT DISTINCT conversation_id, mentions FROM messages WHERE type = 'note'").all();
@@ -231,7 +232,7 @@ router.get('/conversations', async (req, res) => {
     params.push(...ids);
   }
   const rows = await db.prepare(`
-    SELECT cv.*, c.name AS contact_name, c.wa_id, u.name AS assigned_name, a.name AS ai_agent_name
+    SELECT cv.*, c.name AS contact_name, c.wa_id, c.channel AS contact_channel, u.name AS assigned_name, a.name AS ai_agent_name
     FROM conversations cv
     JOIN contacts c ON c.id = cv.contact_id
     LEFT JOIN users u ON u.id = cv.assigned_user_id
@@ -246,7 +247,7 @@ router.get('/conversations', async (req, res) => {
 
 router.get('/conversations/:id', async (req, res) => {
   const conv = await db.prepare(`
-    SELECT cv.*, c.name AS contact_name, c.wa_id, c.tags AS contact_tags, c.attributes AS contact_attributes, u.name AS assigned_name, a.name AS ai_agent_name
+    SELECT cv.*, c.name AS contact_name, c.wa_id, c.channel AS contact_channel, c.tags AS contact_tags, c.attributes AS contact_attributes, u.name AS assigned_name, a.name AS ai_agent_name
     FROM conversations cv
     JOIN contacts c ON c.id = cv.contact_id
     LEFT JOIN users u ON u.id = cv.assigned_user_id

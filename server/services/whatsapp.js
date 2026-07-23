@@ -16,6 +16,22 @@ export async function isSandbox() {
   return (await getSetting('sandbox_mode', '1')) === '1' || !(await getSetting('wa_access_token'));
 }
 
+// Non-WhatsApp channels (web chat, and future Instagram/Messenger adapters)
+// don't go through the Graph API. A contact's id is looked up so every
+// existing send path stays channel-agnostic; web-chat outbound is just stored
+// and the widget's poll delivers it, so we return a synthetic id + fake
+// receipts here.
+async function nonWhatsappChannel(toWaId) {
+  const c = await db.prepare('SELECT channel FROM contacts WHERE wa_id = ?').get(toWaId);
+  return c && c.channel && c.channel !== 'whatsapp' ? c.channel : null;
+}
+
+function syntheticSend() {
+  const id = fakeMessageId();
+  simulateReceipts(id);
+  return id;
+}
+
 async function graphSend(payload) {
   const token = await getSetting('wa_access_token');
   const phoneNumberId = await getSetting('wa_phone_number_id');
@@ -48,6 +64,7 @@ function simulateReceipts(waMessageId) {
 }
 
 export async function sendText(toWaId, text) {
+  if (await nonWhatsappChannel(toWaId)) return syntheticSend();
   if (await isSandbox()) {
     const id = fakeMessageId();
     simulateReceipts(id);
@@ -65,6 +82,7 @@ export async function sendText(toWaId, text) {
 // Send an image or audio message. `link` must be a publicly reachable URL in
 // live mode (relative /uploads paths are resolved against the request host).
 export async function sendMedia(toWaId, { type, link, caption = '' }) {
+  if (await nonWhatsappChannel(toWaId)) return syntheticSend();
   if (await isSandbox()) {
     const id = fakeMessageId();
     simulateReceipts(id);
@@ -100,6 +118,7 @@ export async function downloadMediaById(mediaId, uploadsDir) {
 }
 
 export async function sendTemplate(toWaId, template, bodyParams, { headerImageUrl = null } = {}) {
+  if (await nonWhatsappChannel(toWaId)) return syntheticSend();
   if (await isSandbox()) {
     const id = fakeMessageId();
     simulateReceipts(id);

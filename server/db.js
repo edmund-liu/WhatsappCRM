@@ -116,7 +116,8 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE TABLE IF NOT EXISTS contacts (
   id ${ID_PK},
-  wa_id TEXT NOT NULL UNIQUE,
+  wa_id TEXT NOT NULL UNIQUE,      -- WhatsApp number, or a web-chat visitor id
+  channel TEXT NOT NULL DEFAULT 'whatsapp',
   name TEXT,
   tags TEXT NOT NULL DEFAULT '[]',
   attributes TEXT NOT NULL DEFAULT '{}',
@@ -273,6 +274,8 @@ await addColumnIfMissing('broadcasts', 'header_image_url', 'header_image_url TEX
 await addColumnIfMissing('messages', 'media_url', 'media_url TEXT');
 await addColumnIfMissing('messages', 'buttons', "buttons TEXT NOT NULL DEFAULT '[]'");
 await addColumnIfMissing('messages', 'mentions', "mentions TEXT NOT NULL DEFAULT '[]'"); // @mentioned user ids in internal notes
+// Multi-channel: which channel a contact reaches us on (whatsapp | webchat | ...)
+await addColumnIfMissing('contacts', 'channel', "channel TEXT NOT NULL DEFAULT 'whatsapp'");
 await addColumnIfMissing('conversations', 'away_notified_on', 'away_notified_on TEXT');
 // SLA tracking
 await addColumnIfMissing('conversations', 'awaiting_since', `awaiting_since ${TS}`);
