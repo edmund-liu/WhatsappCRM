@@ -19,6 +19,7 @@ import { getOptOutConfig, setOptOutConfig } from '../services/optOut.js';
 import { getSlaConfig, setSlaConfig, slaStatusFor, recordResponse } from '../services/sla.js';
 import { getCsatConfig, setCsatConfig, maybeSendSurvey } from '../services/csat.js';
 import { fetchExternalData, isExternalDataConfigured } from '../services/externalData.js';
+import { ingestText, ingestCsv, ingestUrl, mineConversations, retrieve } from '../services/knowledge.js';
 import { SERVERLESS } from '../runtime.js';
 
 const router = Router();
@@ -885,6 +886,118 @@ router.post('/simulator/inbound', async (req, res) => {
     mediaUrl: media_url || null,
   });
   res.json({ ok: true, conversation_id: result.conversation.id });
+});
+
+// ---------- Knowledge base (AI training) ----------
+// The knowledge base is what the AI "trains" on: reviewable snippets that get
+// retrieved and injected into agent replies. Admin-only — it shapes automated
+// answers, so ingestion and approval are restricted.
+router.get('/knowledge', requireAdmin, async (req, res) => {
+  const status = req.query.status;
+  const rows = ['pending', 'active', 'archived'].includes(status)
+    ? await db.prepare('SELECT id, source_type, source_ref, title, content, status, created_at FROM knowledge WHERE status = ? ORDER BY id DESC').all(status)
+    : await db.prepare('SELECT id, source_type, source_ref, title, content, status, created_at FROM knowledge ORDER BY id DESC').all();
+  const counts = await db.prepare('SELECT status, COUNT(*) AS c FROM knowledge GROUP BY status').all();
+  res.json({ entries: rows, counts: Object.fromEntries(counts.map((r) => [r.status, r.c])) });
+});
+
+// Manually add a single entry (question/answer or a note).
+router.post('/knowledge', requireAdmin, async (req, res) => {
+  const title = String(req.body?.title || '').trim() || null;
+  const content = String(req.body?.content || '').trim();
+  if (!content) return res.status(400).json({ error: 'Content is required' });
+  const result = await ingestText({ text: content, title, sourceType: 'manual', createdBy: req.user.id });
+  res.json({ ok: true, ...result });
+});
+
+// Upload a document (raw text/markdown/csv body) and chunk it into entries.
+router.post('/knowledge/upload', requireAdmin, express.raw({ type: () => true, limit: '5mb' }), async (req, res) => {
+  if (!req.body?.length) return res.status(400).json({ error: 'No file content received' });
+  const mime = (req.headers['content-type'] || '').split(';')[0].trim();
+  const filename = req.headers['x-filename'] ? decodeURIComponent(req.headers['x-filename']) : 'document';
+  const text = req.body.toString('utf8');
+  if (/[\x00-\x08]/.test(text.slice(0, 2000))) {
+    return res.status(400).json({ error: 'This looks like a binary file (PDF/Word). Please upload plain text, Markdown, or CSV — or paste the text directly.' });
+  }
+  try {
+    const result = mime === 'text/csv' || filename.toLowerCase().endsWith('.csv')
+      ? await ingestCsv({ text, sourceRef: filename, createdBy: req.user.id })
+      : await ingestText({ text, title: filename, sourceRef: filename, createdBy: req.user.id });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Mine resolved conversations into candidate Q&A entries.
+router.post('/knowledge/mine', requireAdmin, async (req, res) => {
+  try {
+    const result = await mineConversations({ createdBy: req.user.id });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Fetch a URL (help-center article / FAQ page) and ingest its text.
+router.post('/knowledge/url', requireAdmin, async (req, res) => {
+  const url = String(req.body?.url || '').trim();
+  if (!/^https?:\/\//i.test(url)) return res.status(400).json({ error: 'Enter a valid http(s) URL' });
+  try {
+    const result = await ingestUrl({ url, createdBy: req.user.id });
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(502).json({ error: err.message });
+  }
+});
+
+// Approve / edit / archive an entry.
+router.patch('/knowledge/:id', requireAdmin, async (req, res) => {
+  const entry = await db.prepare('SELECT * FROM knowledge WHERE id = ?').get(req.params.id);
+  if (!entry) return res.status(404).json({ error: 'Entry not found' });
+  const sets = [];
+  const args = [];
+  if (req.body?.status && ['pending', 'active', 'archived'].includes(req.body.status)) { sets.push('status = ?'); args.push(req.body.status); }
+  if (req.body?.title !== undefined) { sets.push('title = ?'); args.push(String(req.body.title).trim() || null); }
+  if (req.body?.content !== undefined) {
+    const content = String(req.body.content).trim();
+    if (!content) return res.status(400).json({ error: 'Content cannot be empty' });
+    sets.push('content = ?'); args.push(content);
+    // Editing the text invalidates the stored embedding — clear its signature
+    // so retrieval re-embeds it lazily on next use.
+    sets.push('embed_sig = ?'); args.push('stale');
+  }
+  if (!sets.length) return res.status(400).json({ error: 'Nothing to update' });
+  args.push(req.params.id);
+  await db.prepare(`UPDATE knowledge SET ${sets.join(', ')} WHERE id = ?`).run(...args);
+  res.json({ ok: true });
+});
+
+router.delete('/knowledge/:id', requireAdmin, async (req, res) => {
+  await db.prepare('DELETE FROM knowledge WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
+});
+
+// Try a query against the active knowledge base (admin preview of retrieval).
+router.post('/knowledge/search', requireAdmin, async (req, res) => {
+  const q = String(req.body?.q || '').trim();
+  if (!q) return res.status(400).json({ error: 'Enter a question to test' });
+  const hits = await retrieve(q, 5, 0.15);
+  res.json({ hits: hits.map((h) => ({ id: h.id, title: h.title, content: h.content, score: Math.round(h.score * 100) / 100 })) });
+});
+
+// Embeddings provider settings.
+router.get('/knowledge-settings', requireAdmin, async (req, res) => {
+  res.json({
+    provider: await getSetting('embeddings_provider', 'local'),
+    has_key: !!(await getSetting('embeddings_api_key')),
+  });
+});
+router.put('/knowledge-settings', requireAdmin, async (req, res) => {
+  const provider = ['local', 'voyage', 'openai'].includes(req.body?.provider) ? req.body.provider : 'local';
+  await setSetting('embeddings_provider', provider);
+  if (req.body?.api_key !== undefined) await setSetting('embeddings_api_key', String(req.body.api_key || '').trim() || null);
+  res.json({ ok: true, provider });
 });
 
 export default router;

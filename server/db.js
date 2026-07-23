@@ -249,6 +249,25 @@ CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT
 );
+
+-- Knowledge base: the AI's "training" material. Each row is a self-contained
+-- snippet (an FAQ answer, a doc chunk, a mined Q&A pair) with a vector
+-- embedding so relevant entries can be retrieved and injected into the AI
+-- agent's context at answer time. Entries start 'pending' and only ground
+-- replies once an admin marks them 'active'.
+CREATE TABLE IF NOT EXISTS knowledge (
+  id ${ID_PK},
+  source_type TEXT NOT NULL DEFAULT 'manual',  -- manual | document | conversation | url
+  source_ref TEXT,                              -- filename, conversation id, or url
+  title TEXT,                                   -- question / heading
+  content TEXT NOT NULL,                         -- answer / chunk body
+  embedding TEXT,                               -- JSON array of floats
+  embed_sig TEXT,                               -- provider:dim the embedding was made with
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','active','archived')),
+  created_by INTEGER REFERENCES users(id),
+  created_at ${NOW_DEFAULT}
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_status ON knowledge(status);
 `);
 
 // ---------- Column migrations (both dialects) ----------

@@ -14,6 +14,7 @@ import { sendText } from './whatsapp.js';
 import { roundRobinAssign, addSystemNote } from './assignment.js';
 import { recordResponse } from './sla.js';
 import { fetchExternalData, externalDataContextBlock } from './externalData.js';
+import { knowledgeContextBlock, retrieve } from './knowledge.js';
 
 // Pick the AI agent for a new conversation: prefer one whose skills match the
 // detected topic, then a generalist (no skills listed), then any auto-assign
@@ -55,6 +56,9 @@ async function claudeReply(agent, history, contact) {
     content: m.body || '[media message]',
   }));
   const externalBlock = externalDataContextBlock(await fetchExternalData(contact));
+  // Ground the reply in curated knowledge relevant to the latest question.
+  const lastQuestion = [...history].reverse().find((m) => m.direction === 'in')?.body || '';
+  const knowledgeBlock = lastQuestion ? await knowledgeContextBlock(lastQuestion) : '';
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -65,7 +69,7 @@ async function claudeReply(agent, history, contact) {
     body: JSON.stringify({
       model: agent.model,
       max_tokens: 512,
-      system: `${agent.system_prompt}\n\nThe customer's name is ${contact?.name || 'unknown'}. You are replying inside WhatsApp: keep answers concise and conversational.${contactContextBlock(contact)}${externalBlock}\n\nIf you decide the customer needs a human, include the token [HANDOFF] at the end of your reply.`,
+      system: `${agent.system_prompt}\n\nThe customer's name is ${contact?.name || 'unknown'}. You are replying inside WhatsApp: keep answers concise and conversational.${contactContextBlock(contact)}${externalBlock}${knowledgeBlock}\n\nIf you decide the customer needs a human, include the token [HANDOFF] at the end of your reply.`,
       messages,
     }),
   });
@@ -187,6 +191,13 @@ export async function maybeAutoReply(conversationId, inboundText) {
     reply = await claudeReply(agent, history, contact);
   } catch (err) {
     console.error('AI agent error, using fallback:', err.message);
+  }
+  // Without an Anthropic key we can't compose a free-form answer, but we can
+  // still serve the best-matching knowledge entry directly before falling back
+  // to the generic rule responder — so uploaded/mined training shows up too.
+  if (!reply) {
+    const hits = await retrieve(inboundText, 1, 0.4);
+    if (hits[0]) reply = hits[0].content;
   }
   if (!reply) reply = ruleReply(inboundText);
 

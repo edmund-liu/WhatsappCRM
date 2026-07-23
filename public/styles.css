@@ -239,6 +239,15 @@ a.bubble-btn:hover { filter: brightness(0.97); }
 .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12.5px; }
 .mt { margin-top: 14px; }
 
+/* Training / knowledge base */
+.train-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin-bottom: 16px; }
+.train-grid .card { margin-bottom: 0; }
+.kb-card { display: flex; gap: 16px; align-items: flex-start; }
+.kb-actions { display: flex; flex-direction: column; gap: 6px; flex-shrink: 0; }
+.kb-hit { padding: 8px 0; border-top: 1px solid var(--border); font-size: 13px; margin-top: 8px; }
+.kb-hit:first-child { border-top: none; }
+@media (max-width: 640px) { .kb-card { flex-direction: column; } .kb-actions { flex-direction: row; flex-wrap: wrap; } }
+
 .bar-chart { display: flex; align-items: flex-end; gap: 6px; height: 140px; padding-top: 10px; }
 .bar-col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; gap: 2px; height: 100%; }
 .bar-col .bars { display: flex; gap: 2px; align-items: flex-end; flex: 1; width: 100%; justify-content: center; }

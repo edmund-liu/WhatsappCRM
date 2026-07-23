@@ -189,6 +189,7 @@
     ['broadcasts', '📣', 'Broadcasts'],
     ['templates', '📄', 'Templates'],
     ['ai', '🤖', 'AI Agents'],
+    ['training', '🧠', 'Training'],
     ['team', '🧑‍💼', 'Team'],
     ['analytics', '📊', 'Analytics'],
     ['settings', '⚙️', 'Settings'],
@@ -231,7 +232,7 @@
   function renderShell() {
     if (!state.user.status) state.user.status = state.user.available === 0 ? 'offline' : 'online';
     const isAdmin = state.user.role === 'admin';
-    const nav = NAV.filter(([r]) => isAdmin || !['team', 'settings'].includes(r));
+    const nav = NAV.filter(([r]) => isAdmin || !['team', 'settings', 'training'].includes(r));
     $app.innerHTML = `
       <div class="shell">
         <aside class="sidebar">
@@ -1489,6 +1490,213 @@
     }));
   }
 
+  // ---------- Training (knowledge base) ----------
+  const SOURCE_ICON = { manual: '✍️', document: '📄', conversation: '💬', url: '🔗' };
+  let trainingFilter = 'pending';
+
+  async function uploadKnowledgeFile(file) {
+    const res = await fetch('/api/knowledge/upload', {
+      method: 'POST',
+      headers: {
+        'Content-Type': file.type || 'text/plain',
+        'X-Filename': encodeURIComponent(file.name || 'document.txt'),
+        Authorization: 'Bearer ' + state.token,
+      },
+      body: file,
+    });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error || 'Upload failed');
+    return json;
+  }
+
+  async function renderTraining($main) {
+    const [{ entries, counts }, settings] = await Promise.all([
+      api('/knowledge?status=' + trainingFilter),
+      api('/knowledge-settings'),
+    ]);
+    const tab = (key, label) => `<button class="ctab ${trainingFilter === key ? 'active' : ''}" data-kfilter="${key}">${label}${counts[key] ? ` (${counts[key]})` : ''}</button>`;
+
+    $main.innerHTML = `<div class="page">
+      <div class="page-header">
+        <div><h2>🧠 Training</h2><div class="sub">Teach the AI from your own material. Entries are reviewed before they ground automated replies.</div></div>
+      </div>
+
+      <div class="train-grid">
+        <div class="card">
+          <b>📄 Upload documents</b>
+          <div class="muted mt" style="font-size:12.5px">Plain text, Markdown or CSV. CSV with <span class="mono">question,answer</span> columns becomes one entry per row. (PDF/Word: paste the text below.)</div>
+          <input type="file" id="kb-file" accept=".txt,.md,.csv,text/plain,text/markdown,text/csv" multiple hidden />
+          <button class="btn small mt" id="kb-upload-btn">Choose files…</button>
+        </div>
+        <div class="card">
+          <b>💬 Mine conversations</b>
+          <div class="muted mt" style="font-size:12.5px">Extract question→answer pairs from your resolved chats — the answers your team already gave.</div>
+          <button class="btn small mt" id="kb-mine-btn">Mine resolved chats</button>
+        </div>
+        <div class="card">
+          <b>🔗 Add a web page</b>
+          <div class="muted mt" style="font-size:12.5px">Fetch a help-center / FAQ page and chunk its text.</div>
+          <div class="composer mt" style="border:none;padding:0">
+            <input class="input" id="kb-url" placeholder="https://help.example.com/faq" />
+            <button class="btn small" id="kb-url-btn">Add</button>
+          </div>
+        </div>
+        <div class="card">
+          <b>✍️ Add manually</b>
+          <div class="muted mt" style="font-size:12.5px">Write a single FAQ answer or note.</div>
+          <button class="btn small mt" id="kb-manual-btn">New entry</button>
+        </div>
+      </div>
+
+      <div class="card" style="background:#fffbea">
+        🔎 <b>Test retrieval</b> — see what the AI would pull for a customer question (searches active entries only).
+        <div class="composer mt" style="border:none;padding:0">
+          <input class="input" id="kb-test" placeholder="e.g. how long does shipping take?" />
+          <button class="btn small" id="kb-test-btn">Search</button>
+        </div>
+        <div id="kb-test-out"></div>
+      </div>
+
+      <div class="composer-tabs" style="margin:16px 0 4px">
+        ${tab('pending', 'Pending review')}${tab('active', 'Active')}${tab('archived', 'Archived')}${tab('all', 'All')}
+      </div>
+
+      ${entries.length ? entries.map((e) => `
+        <div class="card kb-card">
+          <div style="flex:1;min-width:0">
+            <div>${SOURCE_ICON[e.source_type] || '•'} ${e.title ? `<b>${esc(e.title)}</b>` : '<span class="muted">(no title)</span>'}
+              <span class="badge ${e.status === 'active' ? 'green' : e.status === 'pending' ? 'amber' : 'gray'}">${e.status}</span>
+              ${e.source_ref ? `<span class="muted" style="font-size:12px">· ${esc(String(e.source_ref)).slice(0, 60)}</span>` : ''}
+            </div>
+            <div class="muted mt" style="white-space:pre-wrap;font-size:13px">${esc(e.content).slice(0, 400)}${e.content.length > 400 ? '…' : ''}</div>
+          </div>
+          <div class="kb-actions">
+            ${e.status !== 'active' ? `<button class="btn small" data-kb-approve="${e.id}">✓ Approve</button>` : ''}
+            ${e.status === 'active' ? `<button class="btn small secondary" data-kb-archive="${e.id}">Archive</button>` : ''}
+            <button class="btn small secondary" data-kb-edit="${e.id}">Edit</button>
+            <button class="btn small danger" data-kb-del="${e.id}">Delete</button>
+          </div>
+        </div>`).join('') : `<div class="card muted">No ${trainingFilter === 'all' ? '' : trainingFilter + ' '}entries yet. Add some above — new material lands in “Pending review” for you to approve.</div>`}
+
+      <div class="card mt">
+        <b>⚙️ Embeddings provider</b>
+        <div class="muted mt" style="font-size:12.5px">How entries are matched to questions. <b>Local</b> needs no key and works out of the box; a provider gives higher-quality semantic matching.</div>
+        <div class="form-row mt">
+          <label class="field">Provider
+            <select class="input" id="kb-provider">
+              <option value="local" ${settings.provider === 'local' ? 'selected' : ''}>Local (built-in, no key)</option>
+              <option value="voyage" ${settings.provider === 'voyage' ? 'selected' : ''}>Voyage AI</option>
+              <option value="openai" ${settings.provider === 'openai' ? 'selected' : ''}>OpenAI</option>
+            </select></label>
+          <label class="field">API key ${settings.has_key ? '<span class="muted">(set — leave blank to keep)</span>' : ''}
+            <input class="input" id="kb-key" type="password" placeholder="${settings.has_key ? '••••••••' : 'Paste provider API key'}" /></label>
+        </div>
+        <button class="btn small" id="kb-settings-save">Save provider</button>
+      </div>
+    </div>`;
+
+    $main.querySelectorAll('[data-kfilter]').forEach((b) => b.addEventListener('click', () => { trainingFilter = b.dataset.kfilter; renderRoute(); }));
+
+    // Ingestion actions
+    const fileInput = document.getElementById('kb-file');
+    document.getElementById('kb-upload-btn').addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', async () => {
+      const files = [...fileInput.files];
+      if (!files.length) return;
+      try {
+        let total = 0;
+        for (const f of files) { const r = await uploadKnowledgeFile(f); total += r.added || 0; }
+        toast(`Added ${total} entr${total === 1 ? 'y' : 'ies'} — review them in Pending`);
+        trainingFilter = 'pending'; renderRoute();
+      } catch (err) { toast(err.message, true); }
+    });
+
+    document.getElementById('kb-mine-btn').addEventListener('click', async (e) => {
+      e.target.disabled = true; e.target.textContent = 'Mining…';
+      try {
+        const r = await api('/knowledge/mine', { method: 'POST' });
+        toast(r.added ? `Mined ${r.added} Q&A pair${r.added === 1 ? '' : 's'} — review in Pending` : 'No new Q&A pairs found in resolved chats');
+        trainingFilter = 'pending'; renderRoute();
+      } catch (err) { toast(err.message, true); e.target.disabled = false; e.target.textContent = 'Mine resolved chats'; }
+    });
+
+    const urlBtn = document.getElementById('kb-url-btn');
+    urlBtn.addEventListener('click', async () => {
+      const url = document.getElementById('kb-url').value.trim();
+      if (!url) return;
+      urlBtn.disabled = true;
+      try {
+        const r = await api('/knowledge/url', { method: 'POST', body: { url } });
+        toast(`Added ${r.added} entr${r.added === 1 ? 'y' : 'ies'} from the page — review in Pending`);
+        trainingFilter = 'pending'; renderRoute();
+      } catch (err) { toast(err.message, true); urlBtn.disabled = false; }
+    });
+
+    document.getElementById('kb-manual-btn').addEventListener('click', () => openKnowledgeEditor(null));
+
+    // Test retrieval
+    const testBtn = document.getElementById('kb-test-btn');
+    const runTest = async () => {
+      const q = document.getElementById('kb-test').value.trim();
+      const out = document.getElementById('kb-test-out');
+      if (!q) return;
+      out.innerHTML = '<div class="muted mt">Searching…</div>';
+      try {
+        const { hits } = await api('/knowledge/search', { method: 'POST', body: { q } });
+        out.innerHTML = hits.length
+          ? hits.map((h) => `<div class="kb-hit"><span class="badge ${h.score >= 0.4 ? 'green' : 'gray'}">${h.score}</span> ${h.title ? '<b>' + esc(h.title) + '</b> — ' : ''}${esc(h.content).slice(0, 200)}</div>`).join('')
+          : '<div class="muted mt">No active entries matched. Approve some entries first, or lower the wording overlap.</div>';
+      } catch (err) { out.innerHTML = `<div class="error-box mt">${esc(err.message)}</div>`; }
+    };
+    testBtn.addEventListener('click', runTest);
+    document.getElementById('kb-test').addEventListener('keydown', (e) => { if (e.key === 'Enter') runTest(); });
+
+    // Entry actions
+    $main.querySelectorAll('[data-kb-approve]').forEach((b) => b.addEventListener('click', async () => {
+      try { await api('/knowledge/' + b.dataset.kbApprove, { method: 'PATCH', body: { status: 'active' } }); toast('Approved — now grounding AI replies'); renderRoute(); }
+      catch (err) { toast(err.message, true); }
+    }));
+    $main.querySelectorAll('[data-kb-archive]').forEach((b) => b.addEventListener('click', async () => {
+      try { await api('/knowledge/' + b.dataset.kbArchive, { method: 'PATCH', body: { status: 'archived' } }); renderRoute(); }
+      catch (err) { toast(err.message, true); }
+    }));
+    $main.querySelectorAll('[data-kb-edit]').forEach((b) => b.addEventListener('click', () => openKnowledgeEditor(entries.find((e) => e.id === Number(b.dataset.kbEdit)))));
+    $main.querySelectorAll('[data-kb-del]').forEach((b) => b.addEventListener('click', async () => {
+      if (!confirm('Delete this knowledge entry?')) return;
+      try { await api('/knowledge/' + b.dataset.kbDel, { method: 'DELETE' }); renderRoute(); }
+      catch (err) { toast(err.message, true); }
+    }));
+
+    document.getElementById('kb-settings-save').addEventListener('click', async () => {
+      const provider = document.getElementById('kb-provider').value;
+      const key = document.getElementById('kb-key').value;
+      try {
+        await api('/knowledge-settings', { method: 'PUT', body: { provider, ...(key ? { api_key: key } : {}) } });
+        toast('Embeddings provider saved'); renderRoute();
+      } catch (err) { toast(err.message, true); }
+    });
+  }
+
+  function openKnowledgeEditor(entry) {
+    const m = modal(`
+      <h3>${entry ? 'Edit knowledge entry' : 'New knowledge entry'}</h3>
+      <label class="field">Title / question (optional) <input class="input" id="kb-e-title" value="${esc(entry?.title || '')}" placeholder="How long does shipping take?" /></label>
+      <label class="field">Content / answer <textarea class="input" id="kb-e-content" rows="6" placeholder="Standard shipping takes 3–5 business days and is free over $50.">${esc(entry?.content || '')}</textarea></label>
+      ${entry ? '' : '<div class="muted" style="font-size:12px;margin-bottom:8px">Saved as “pending” — approve it to start grounding replies.</div>'}
+      <div class="actions"><button class="btn secondary" id="kb-e-cancel">Cancel</button><button class="btn" id="kb-e-save">Save</button></div>`);
+    m.querySelector('#kb-e-cancel').addEventListener('click', () => m.remove());
+    m.querySelector('#kb-e-save').addEventListener('click', async () => {
+      const title = m.querySelector('#kb-e-title').value.trim();
+      const content = m.querySelector('#kb-e-content').value.trim();
+      if (!content) return toast('Content is required', true);
+      try {
+        if (entry) await api('/knowledge/' + entry.id, { method: 'PATCH', body: { title, content } });
+        else await api('/knowledge', { method: 'POST', body: { title, content } });
+        m.remove(); renderRoute();
+      } catch (err) { toast(err.message, true); }
+    });
+  }
+
   // ---------- Team ----------
   async function renderTeam($main) {
     const [users, skills] = await Promise.all([api('/users'), api('/skills')]);
@@ -2025,6 +2233,7 @@
     broadcasts: renderBroadcasts,
     templates: renderTemplates,
     ai: renderAiAgents,
+    training: renderTraining,
     team: renderTeam,
     analytics: renderAnalytics,
     settings: renderSettings,
