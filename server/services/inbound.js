@@ -21,6 +21,7 @@ import { getOrCreateConversation } from './conversations.js';
 import { getBusinessHoursStatus, computeNextOpenLabel, renderAwayMessage } from './businessHours.js';
 import { handleOptKeyword } from './optOut.js';
 import { markAwaiting, recordResponse } from './sla.js';
+import { handleSurveyReply } from './csat.js';
 import { sendText } from './whatsapp.js';
 
 export async function handleInboundMessage({ waId, name, text, waMessageId, type = 'text', mediaUrl = null }) {
@@ -39,26 +40,32 @@ export async function handleInboundMessage({ waId, name, text, waMessageId, type
   // Always the contact's single thread — history is never split across rows.
   const { conv, created } = await getOrCreateConversation(contact.id);
   let conversation = conv;
-  let isNew = created;
-  if (!created && conversation.status === 'resolved') {
-    // A message after resolution reopens the same thread and re-routes it.
-    await db.prepare("UPDATE conversations SET status = 'open', assigned_user_id = NULL, ai_enabled = 0, resolved_at = NULL WHERE id = ?").run(conversation.id);
-    conversation = await db.prepare('SELECT * FROM conversations WHERE id = ?').get(conversation.id);
-    await addSystemNote(conversation.id, 'Conversation reopened');
-    isNew = true;
-  }
 
+  // Record the inbound message first so it's always in the thread.
   await db.prepare(
     "INSERT INTO messages (conversation_id, direction, sender_type, type, body, wa_message_id, status, media_url) VALUES (?, 'in', 'contact', ?, ?, ?, 'received', ?)"
   ).run(conversation.id, type, text, waMessageId || null, mediaUrl);
   const preview = type === 'image' ? `📷 ${text || 'Photo'}` : type === 'audio' ? '🎤 Voice message' : text;
-  await db.prepare(
-    "UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP, last_message_preview = ?, unread_count = unread_count + 1, status = CASE WHEN status = 'resolved' THEN 'open' ELSE status END WHERE id = ?"
-  ).run(preview.slice(0, 120), conversation.id);
+  await db.prepare('UPDATE conversations SET last_message_at = CURRENT_TIMESTAMP, last_message_preview = ?, unread_count = unread_count + 1 WHERE id = ?')
+    .run(preview.slice(0, 120), conversation.id);
+  emit('message_created', { conversation_id: conversation.id });
+  emit('conversation_updated', { conversation_id: conversation.id });
+
+  // A pending satisfaction survey rating (or a follow-up comment) is captured
+  // without reopening or routing — checked against the pre-message state.
+  const csatResult = await handleSurveyReply(conversation, contact, text);
+  if (csatResult) return { contact, conversation };
+
+  // Otherwise, a message on a resolved thread reopens and re-routes it.
+  let isNew = created;
+  if (!created && conversation.status === 'resolved') {
+    await db.prepare("UPDATE conversations SET status = 'open', assigned_user_id = NULL, ai_enabled = 0, resolved_at = NULL, awaiting_csat = 0 WHERE id = ?").run(conversation.id);
+    await addSystemNote(conversation.id, 'Conversation reopened');
+    isNew = true;
+  }
+  conversation = await db.prepare('SELECT * FROM conversations WHERE id = ?').get(conversation.id);
   // Start the SLA clock — the customer is now waiting for a response.
   await markAwaiting(conversation.id);
-
-  emit('message_created', { conversation_id: conversation.id });
   emit('conversation_updated', { conversation_id: conversation.id });
 
   // STOP/START is pure subscription housekeeping — handle it and stop, no

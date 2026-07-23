@@ -137,6 +137,10 @@ CREATE TABLE IF NOT EXISTS conversations (
   awaiting_since ${TS},              -- when the current unanswered-customer period began (SLA clock)
   first_response_seconds INTEGER,    -- historical: seconds to the first outbound response
   resolved_at ${TS},                 -- when the conversation was marked resolved
+  awaiting_csat INTEGER NOT NULL DEFAULT 0,  -- a satisfaction survey was sent, waiting for a rating
+  csat_score INTEGER,                -- customer's satisfaction rating
+  csat_comment TEXT,                 -- optional free-text left after the rating
+  csat_at ${TS},                     -- when the rating was received
   unread_count INTEGER NOT NULL DEFAULT 0,
   last_message_at ${TS},
   last_message_preview TEXT,
@@ -265,6 +269,11 @@ await addColumnIfMissing('conversations', 'away_notified_on', 'away_notified_on 
 await addColumnIfMissing('conversations', 'awaiting_since', `awaiting_since ${TS}`);
 await addColumnIfMissing('conversations', 'first_response_seconds', 'first_response_seconds INTEGER');
 await addColumnIfMissing('conversations', 'resolved_at', `resolved_at ${TS}`);
+// CSAT (post-resolution satisfaction survey)
+await addColumnIfMissing('conversations', 'awaiting_csat', 'awaiting_csat INTEGER NOT NULL DEFAULT 0');
+await addColumnIfMissing('conversations', 'csat_score', 'csat_score INTEGER');
+await addColumnIfMissing('conversations', 'csat_comment', 'csat_comment TEXT');
+await addColumnIfMissing('conversations', 'csat_at', `csat_at ${TS}`);
 
 // Ordered list of placeholder tokens in a template body, e.g.
 // "Hi {{name}}, order {{1}} ships {{2}}" -> ["name","1","2"]. Meta templates

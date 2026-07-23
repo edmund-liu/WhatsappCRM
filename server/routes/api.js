@@ -17,6 +17,7 @@ import { getBusinessHoursConfig, setBusinessHoursConfig, computeNextOpenLabel, r
 import { getSessionWindowStatus } from '../services/sessionWindow.js';
 import { getOptOutConfig, setOptOutConfig } from '../services/optOut.js';
 import { getSlaConfig, setSlaConfig, slaStatusFor, recordResponse } from '../services/sla.js';
+import { getCsatConfig, setCsatConfig, maybeSendSurvey } from '../services/csat.js';
 import { SERVERLESS } from '../runtime.js';
 
 const router = Router();
@@ -218,7 +219,8 @@ router.get('/conversations', async (req, res) => {
     ORDER BY cv.last_message_at DESC NULLS LAST
   `).all(...params);
   const slaConfig = await getSlaConfig();
-  res.json(rows.map((r) => ({ ...r, sla: slaStatusFor(r, slaConfig) })));
+  const { scale: csatScale } = await getCsatConfig();
+  res.json(rows.map((r) => ({ ...r, sla: slaStatusFor(r, slaConfig), csat_scale: csatScale })));
 });
 
 router.get('/conversations/:id', async (req, res) => {
@@ -233,7 +235,8 @@ router.get('/conversations/:id', async (req, res) => {
   if (!conv) return res.status(404).json({ error: 'Conversation not found' });
   const session = await getSessionWindowStatus(conv.id);
   const sla = slaStatusFor(conv, await getSlaConfig());
-  res.json({ ...conv, contact_tags: JSON.parse(conv.contact_tags), session, sla });
+  const { scale: csatScale } = await getCsatConfig();
+  res.json({ ...conv, contact_tags: JSON.parse(conv.contact_tags), session, sla, csat_scale: csatScale });
 });
 
 router.get('/conversations/:id/messages', async (req, res) => {
@@ -346,6 +349,8 @@ router.patch('/conversations/:id', async (req, res) => {
       await db.prepare('UPDATE conversations SET status = ?, resolved_at = NULL WHERE id = ?').run(status, conv.id);
     }
     await addSystemNote(conv.id, `Marked as ${status} by ${req.user.name}`);
+    // Fire the satisfaction survey on resolution (if enabled and reachable).
+    if (status === 'resolved') await maybeSendSurvey(conv.id).catch((err) => console.error('CSAT send failed:', err.message));
   }
   if (assigned_user_id !== undefined) {
     await assignConversation(conv.id, assigned_user_id || null, { by: req.user.name });
@@ -648,6 +653,21 @@ router.put('/sla-settings', requireAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ---------- CSAT settings ----------
+router.get('/csat-settings', requireAdmin, async (req, res) => {
+  res.json(await getCsatConfig());
+});
+
+router.put('/csat-settings', requireAdmin, async (req, res) => {
+  const { enabled, scale, message, thanksMessage } = req.body || {};
+  if (scale !== undefined && (!Number.isInteger(Number(scale)) || Number(scale) < 2 || Number(scale) > 10)) {
+    return res.status(400).json({ error: 'Scale must be a whole number between 2 and 10' });
+  }
+  if (message !== undefined && !String(message).trim()) return res.status(400).json({ error: 'Survey message cannot be empty' });
+  await setCsatConfig({ enabled, scale, message, thanksMessage });
+  res.json({ ok: true });
+});
+
 // ---------- Analytics ----------
 router.get('/analytics', async (req, res) => {
   const count = async (sql) => (await db.prepare(sql).get()).c;
@@ -696,7 +716,21 @@ router.get('/analytics', async (req, res) => {
     resolved_count: resRow.c || 0,
     open_breaches: openBreaches,
   };
-  res.json({ counters, perAgent, daily, sla });
+
+  // CSAT: average score, response count, and rating distribution.
+  const csatConfig = await getCsatConfig();
+  const csatAgg = await db.prepare('SELECT AVG(csat_score) AS avg, COUNT(*) AS c FROM conversations WHERE csat_score IS NOT NULL').get();
+  const dist = await db.prepare('SELECT csat_score AS score, COUNT(*) AS c FROM conversations WHERE csat_score IS NOT NULL GROUP BY csat_score ORDER BY csat_score').all();
+  const surveysSent = await count('SELECT COUNT(*) AS c FROM conversations WHERE awaiting_csat = 1 OR csat_score IS NOT NULL');
+  const csat = {
+    enabled: csatConfig.enabled,
+    scale: csatConfig.scale,
+    avg_score: csatAgg.avg != null ? Math.round(csatAgg.avg * 100) / 100 : null,
+    responses: csatAgg.c || 0,
+    surveys_sent: surveysSent,
+    distribution: dist,
+  };
+  res.json({ counters, perAgent, daily, sla, csat });
 });
 
 // ---------- Sandbox simulator ----------

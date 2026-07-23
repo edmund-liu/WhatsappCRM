@@ -337,6 +337,16 @@
     });
   }
 
+  // Rating badge: filled/empty stars up to the score, colored by satisfaction.
+  function csatBadgeHtml(conv) {
+    if (conv.csat_score == null) {
+      return conv.awaiting_csat ? '<span class="badge gray">⭐ survey sent</span>' : '';
+    }
+    const scale = conv.csat_scale || 5;
+    const cls = conv.csat_score >= scale - 1 ? 'green' : conv.csat_score >= Math.ceil(scale / 2) ? 'amber' : 'red';
+    return `<span class="badge ${cls}">⭐ ${conv.csat_score}/${scale}</span>`;
+  }
+
   function convListHtml() {
     return state.conversations.map((c) => `
       <button class="conv-item ${c.id === state.activeConvId ? 'active' : ''}" data-conv="${c.id}">
@@ -348,6 +358,7 @@
         <div class="meta">
           ${statusBadge(c.status)}
           ${slaBadgeHtml(c.sla)}
+          ${csatBadgeHtml(c)}
           ${c.required_skill ? `<span class="badge amber">🏷 ${esc(c.required_skill)}</span>` : ''}
           ${c.ai_enabled ? `<span class="badge purple">🤖 ${esc(c.ai_agent_name || 'AI')}</span>` : ''}
           ${c.assigned_name ? `<span class="badge blue">${esc(c.assigned_name)}</span>` : (!c.ai_enabled ? '<span class="badge gray">unassigned</span>' : '')}
@@ -374,6 +385,7 @@
       // changes when the clock starts/stops — the live countdown is handled
       // by tickSla, not by re-rendering.
       conv.sla?.active, conv.sla?.dueAt,
+      conv.csat_score, conv.awaiting_csat,
     ]) : '';
   }
 
@@ -490,6 +502,7 @@
           <div class="actions">
             ${statusBadge(c.status)}
             ${slaBadgeHtml(c.sla)}
+            ${csatBadgeHtml(c)}
             ${c.required_skill ? `<span class="badge amber">🏷 ${esc(c.required_skill)}</span>` : ''}
             ${c.ai_enabled ? `<span class="badge purple">🤖 ${esc(c.ai_agent_name)}</span>` : ''}
             <select class="input" id="assign-select" style="width:auto;padding:5px 8px">
@@ -529,7 +542,7 @@
     return (() => {
             let prevKey = null;
             return state.messages.map((m) => {
-              if (m.sender_type === 'system' && m.type !== 'auto_reply') {
+              if (m.sender_type === 'system' && m.type !== 'auto_reply' && m.type !== 'csat') {
                 prevKey = 'sys';
                 if (m.body.startsWith('📋')) {
                   return `<div class="handoff-card"><div class="hc-title">📋 Handoff summary</div>${esc(m.body.replace(/^📋 Handoff summary — /, ''))}</div>`;
@@ -541,6 +554,7 @@
               prevKey = groupKey;
               const senderLabel = !first ? '' :
                 m.type === 'auto_reply' ? '<div class="sender away">🕒 Auto-reply</div>'
+                : m.type === 'csat' ? '<div class="sender away">⭐ Survey</div>'
                 : m.sender_type === 'ai' ? `<div class="sender ai">🤖 ${esc(m.ai_agent_name || 'AI Agent')}</div>`
                 : m.sender_type === 'broadcast' ? '<div class="sender broadcast">📣 Broadcast</div>'
                 : m.sender_type === 'agent' && m.sender_name ? `<div class="sender">${esc(m.sender_name)}</div>` : '';
@@ -666,6 +680,8 @@
           <div class="cp-row"><span>Assigned to</span><span>${esc(c.assigned_name || '—')}</span></div>
           ${c.ai_enabled ? `<div class="cp-row"><span>AI agent</span><span class="badge purple">🤖 ${esc(c.ai_agent_name)}</span></div>` : ''}
           <div class="cp-row"><span>First message</span><span>${firstMsg ? fmtTime(firstMsg.created_at) : '—'}</span></div>
+          ${c.csat_score != null ? `<div class="cp-row"><span>Satisfaction</span><span>${csatBadgeHtml(c)}</span></div>
+            ${c.csat_comment ? `<div class="cp-summary" style="margin-top:6px">“${esc(c.csat_comment)}”</div>` : ''}` : ''}
         </div>
         <div class="cp-section">
           <div class="cp-label">History (all in this thread)</div>
@@ -1373,7 +1389,7 @@
   }
 
   async function renderAnalytics($main) {
-    const { counters, perAgent, daily, sla } = await api('/analytics');
+    const { counters, perAgent, daily, sla, csat } = await api('/analytics');
     const maxDaily = Math.max(1, ...daily.map((d) => Math.max(d.inbound, d.outbound)));
     const slaCard = sla ? `
       <div class="card">
@@ -1388,9 +1404,30 @@
           <div class="stat"><div class="num" style="color:${sla.open_breaches ? 'var(--danger)' : 'var(--green-dark)'}">${sla.open_breaches}</div><div class="lbl">Open SLA breaches</div></div>
         </div>
       </div>` : '';
+    const maxCsat = csat ? Math.max(1, ...(csat.distribution || []).map((d) => d.c)) : 1;
+    const csatCard = csat ? `
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:8px">
+          <b>Customer satisfaction (CSAT)</b>
+          <span class="muted" style="font-size:12.5px">${csat.enabled ? `1–${csat.scale} rating on resolution` : 'CSAT is off — enable it in Settings'}</span>
+        </div>
+        <div class="stat-grid mt">
+          <div class="stat"><div class="num">${csat.avg_score == null ? '—' : csat.avg_score + ' / ' + csat.scale}</div><div class="lbl">Average score</div></div>
+          <div class="stat"><div class="num">${csat.responses}</div><div class="lbl">Ratings received</div></div>
+          <div class="stat"><div class="num">${csat.surveys_sent ? Math.round((csat.responses / csat.surveys_sent) * 100) + '%' : '—'}</div><div class="lbl">Response rate</div></div>
+        </div>
+        ${(csat.distribution || []).length ? `<div class="mt">
+          ${csat.distribution.map((d) => `<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+            <span style="width:40px" class="muted">${d.score}★</span>
+            <div style="flex:1;background:#eef;border-radius:4px;overflow:hidden;height:16px"><div style="width:${(d.c / maxCsat) * 100}%;height:100%;background:var(--green)"></div></div>
+            <span style="width:30px;text-align:right" class="muted">${d.c}</span>
+          </div>`).join('')}
+        </div>` : '<div class="muted mt">No ratings yet</div>'}
+      </div>` : '';
     $main.innerHTML = `<div class="page">
       <div class="page-header"><div><h2>Analytics</h2><div class="sub">Live overview of inbox and campaign activity</div></div></div>
       ${slaCard}
+      ${csatCard}
       <div class="stat-grid">
         <div class="stat"><div class="num">${counters.contacts}</div><div class="lbl">Contacts</div></div>
         <div class="stat"><div class="num">${counters.conversations_open}</div><div class="lbl">Open conversations</div></div>
@@ -1437,7 +1474,7 @@
   const DAY_ORDER = [['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday'], ['sun', 'Sunday']];
 
   async function renderSettings($main) {
-    const [s, bh, holidays, optOut, slaCfg] = await Promise.all([api('/settings'), api('/business-hours'), api('/holidays'), api('/opt-out-settings'), api('/sla-settings')]);
+    const [s, bh, holidays, optOut, slaCfg, csatCfg] = await Promise.all([api('/settings'), api('/business-hours'), api('/holidays'), api('/opt-out-settings'), api('/sla-settings'), api('/csat-settings')]);
     $main.innerHTML = `<div class="page">
       <div class="page-header"><div><h2>Settings</h2><div class="sub">WhatsApp Cloud API & AI configuration</div></div></div>
       <div class="card">
@@ -1540,6 +1577,20 @@
           <input class="input" id="sla-minutes" type="number" min="1" value="${slaCfg.responseMinutes}" /></label>
         <button class="btn" id="sla-save">Save SLA settings</button>
       </div>
+
+      <div class="card">
+        <h3 style="margin-bottom:4px">Satisfaction survey (CSAT)</h3>
+        <div class="muted" style="margin-bottom:12px">When a conversation is resolved, ask the customer to rate it. Their next numeric reply is captured as the score; a short follow-up is saved as a comment.</div>
+        <label style="display:flex;gap:8px;align-items:center;margin-bottom:14px">
+          <input type="checkbox" id="csat-enabled" ${csatCfg.enabled ? 'checked' : ''}/>
+          <b>Send a survey when a chat is resolved</b>
+        </label>
+        <label class="field" style="max-width:220px">Rating scale (1 to N)
+          <input class="input" id="csat-scale" type="number" min="2" max="10" value="${csatCfg.scale}" /></label>
+        <label class="field">Survey message <textarea class="input" id="csat-message" rows="2">${esc(csatCfg.message)}</textarea></label>
+        <label class="field">Thank-you message <textarea class="input" id="csat-thanks" rows="2">${esc(csatCfg.thanksMessage)}</textarea></label>
+        <button class="btn" id="csat-save">Save survey settings</button>
+      </div>
     </div>`;
 
     document.getElementById('st-save').addEventListener('click', async () => {
@@ -1621,6 +1672,18 @@
           responseMinutes: Number(document.getElementById('sla-minutes').value),
         } });
         toast('SLA settings saved'); renderRoute();
+      } catch (err) { toast(err.message, true); }
+    });
+
+    document.getElementById('csat-save').addEventListener('click', async () => {
+      try {
+        await api('/csat-settings', { method: 'PUT', body: {
+          enabled: document.getElementById('csat-enabled').checked,
+          scale: Number(document.getElementById('csat-scale').value),
+          message: document.getElementById('csat-message').value.trim(),
+          thanksMessage: document.getElementById('csat-thanks').value.trim(),
+        } });
+        toast('Survey settings saved'); renderRoute();
       } catch (err) { toast(err.message, true); }
     });
   }
