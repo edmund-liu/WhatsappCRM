@@ -209,6 +209,15 @@ router.get('/conversations', async (req, res) => {
   if (filter === 'mine') { where += ' AND cv.assigned_user_id = ?'; params.push(req.user.id); }
   if (filter === 'unassigned') where += ' AND cv.assigned_user_id IS NULL AND cv.ai_enabled = 0';
   if (filter === 'ai') where += ' AND cv.ai_enabled = 1';
+  if (filter === 'mentions') {
+    // Conversations where an unresolved note @mentions the current user.
+    const noteRows = await db.prepare("SELECT DISTINCT conversation_id, mentions FROM messages WHERE type = 'note'").all();
+    const ids = noteRows.filter((r) => { try { return JSON.parse(r.mentions || '[]').includes(req.user.id); } catch { return false; } })
+      .map((r) => r.conversation_id);
+    if (!ids.length) return res.json([]);
+    where += ` AND cv.status != 'resolved' AND cv.id IN (${ids.map(() => '?').join(',')})`;
+    params.push(...ids);
+  }
   const rows = await db.prepare(`
     SELECT cv.*, c.name AS contact_name, c.wa_id, u.name AS assigned_name, a.name AS ai_agent_name
     FROM conversations cv
@@ -304,6 +313,58 @@ router.post('/conversations/:id/messages', async (req, res) => {
   } catch (err) {
     res.status(502).json({ error: `Send failed: ${err.message}` });
   }
+});
+
+// Internal note — team-only, never sent to the customer. @mentions of active
+// teammates by name are detected and stored so a mentions filter can surface
+// them for the person tagged.
+router.post('/conversations/:id/notes', async (req, res) => {
+  const conv = await db.prepare('SELECT * FROM conversations WHERE id = ?').get(req.params.id);
+  if (!conv) return res.status(404).json({ error: 'Conversation not found' });
+  const text = String(req.body?.text || '').trim();
+  if (!text) return res.status(400).json({ error: 'Note text is required' });
+  const users = await db.prepare('SELECT id, name FROM users WHERE is_active = 1').all();
+  const lower = text.toLowerCase();
+  const mentioned = users.filter((u) => {
+    const first = u.name.split(/\s+/)[0].toLowerCase();
+    return lower.includes('@' + u.name.toLowerCase()) || lower.includes('@' + first);
+  }).map((u) => u.id);
+  const info = await db.prepare(
+    "INSERT INTO messages (conversation_id, direction, sender_type, sender_user_id, type, body, status, mentions) VALUES (?, 'out', 'system', ?, 'note', ?, 'sent', ?)"
+  ).run(conv.id, req.user.id, text, JSON.stringify(mentioned));
+  emit('message_created', { conversation_id: conv.id });
+  emit('conversation_updated', { conversation_id: conv.id });
+  res.json(await db.prepare('SELECT * FROM messages WHERE id = ?').get(info.lastInsertRowid));
+});
+
+// ---------- Canned replies (snippets) ----------
+router.get('/canned-replies', async (req, res) => {
+  res.json(await db.prepare('SELECT * FROM canned_replies ORDER BY shortcut').all());
+});
+
+router.post('/canned-replies', requireAdmin, async (req, res) => {
+  const { shortcut, title, body } = req.body || {};
+  const slug = String(shortcut || '').toLowerCase().trim().replace(/[^a-z0-9_-]/g, '');
+  if (!slug || !body) return res.status(400).json({ error: 'shortcut and body are required' });
+  try {
+    const info = await db.prepare('INSERT INTO canned_replies (shortcut, title, body) VALUES (?, ?, ?)').run(slug, title || null, body);
+    res.json(await db.prepare('SELECT * FROM canned_replies WHERE id = ?').get(info.lastInsertRowid));
+  } catch {
+    res.status(400).json({ error: 'That shortcut is already in use' });
+  }
+});
+
+router.patch('/canned-replies/:id', requireAdmin, async (req, res) => {
+  const row = await db.prepare('SELECT * FROM canned_replies WHERE id = ?').get(req.params.id);
+  if (!row) return res.status(404).json({ error: 'Snippet not found' });
+  const { title, body } = req.body || {};
+  await db.prepare('UPDATE canned_replies SET title = ?, body = ? WHERE id = ?').run(title ?? row.title, body ?? row.body, row.id);
+  res.json({ ok: true });
+});
+
+router.delete('/canned-replies/:id', requireAdmin, async (req, res) => {
+  await db.prepare('DELETE FROM canned_replies WHERE id = ?').run(req.params.id);
+  res.json({ ok: true });
 });
 
 // Send an approved template to this conversation's contact — the one kind of

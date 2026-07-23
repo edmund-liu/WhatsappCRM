@@ -370,6 +370,7 @@
   function wireConvList($main) {
     $main.querySelectorAll('[data-conv]').forEach((b) => b.addEventListener('click', async () => {
       state.activeConvId = Number(b.dataset.conv);
+      composerMode = 'reply'; // fresh conversation starts in reply mode
       await loadMessages(state.activeConvId);
       renderRoute();
     }));
@@ -401,11 +402,12 @@
     // each full render.
     try { state.users = await api('/users'); } catch { state.users = state.users || []; }
     try { state.templates = await api('/templates'); } catch { state.templates = state.templates || []; }
+    try { state.canned = await api('/canned-replies'); } catch { state.canned = state.canned || []; }
     await loadConversations();
     if (state.activeConvId && !state.activeConv) await loadMessages(state.activeConvId).catch(() => { state.activeConvId = null; });
     takeSnapshots();
 
-    const filters = [['all', 'All'], ['mine', 'Mine'], ['unassigned', 'Unassigned'], ['ai', '🤖 AI']];
+    const filters = [['all', 'All'], ['mine', 'Mine'], ['unassigned', 'Unassigned'], ['ai', '🤖 AI'], ['mentions', '@ Me']];
     $main.innerHTML = `
       <div class="inbox">
         <div class="conv-list">
@@ -542,6 +544,11 @@
     return (() => {
             let prevKey = null;
             return state.messages.map((m) => {
+              if (m.type === 'note') {
+                prevKey = 'note';
+                const body = esc(m.body).replace(/@([\w.]+)/g, '<b>@$1</b>');
+                return `<div class="note-card"><div class="nc-head">🔒 Internal note${m.sender_name ? ' · ' + esc(m.sender_name) : ''}</div><div>${body}</div></div>`;
+              }
               if (m.sender_type === 'system' && m.type !== 'auto_reply' && m.type !== 'csat') {
                 prevKey = 'sys';
                 if (m.body.startsWith('📋')) {
@@ -582,11 +589,16 @@
     if (session && !session.withinWindow) return templateComposerHtml();
     return `
         <div class="composer-wrap">
+          <div class="composer-tabs">
+            <button class="ctab active" id="tab-reply" data-mode="reply">Reply</button>
+            <button class="ctab" id="tab-note" data-mode="note">🔒 Note</button>
+          </div>
+          <div id="snippet-menu" class="snippet-menu" hidden></div>
           <div id="attach-preview"></div>
           <div class="composer">
             <button class="icon-btn" id="attach-btn" title="Attach an image or audio file (or paste a screenshot)">📎</button>
             <input type="file" id="attach-input" accept="image/png,image/jpeg,image/webp,image/gif,audio/*" hidden />
-            <textarea id="composer-input" rows="1" placeholder="Type a reply, or paste a screenshot… (Enter to send)"></textarea>
+            <textarea id="composer-input" rows="1" placeholder="Type a reply, / for a snippet, or paste a screenshot… (Enter to send)"></textarea>
             <button class="btn send-btn" id="send-btn" title="Send">➤</button>
           </div>
         </div>`;
@@ -613,6 +625,7 @@
   }
 
   let composerAttachment = null; // { file, kind, previewUrl }
+  let composerMode = 'reply';    // 'reply' | 'note'
 
   async function uploadFile(file) {
     const res = await fetch('/api/uploads', {
@@ -768,9 +781,19 @@
       return;
     }
 
+    const composerInput = document.getElementById('composer-input');
     const send = async () => {
       const input = document.getElementById('composer-input');
       const text = input.value.trim();
+      if (composerMode === 'note') {
+        if (!text) return;
+        try {
+          await api(`/conversations/${c.id}/notes`, { method: 'POST', body: { text } });
+          input.value = '';
+          await loadMessages(c.id); renderRoute();
+        } catch (err) { toast(err.message, true); }
+        return;
+      }
       if (!text && !composerAttachment) return;
       const sendBtn = document.getElementById('send-btn');
       sendBtn.disabled = true;
@@ -795,10 +818,58 @@
       finally { const b = document.getElementById('send-btn'); if (b) b.disabled = false; }
     };
     document.getElementById('send-btn').addEventListener('click', send);
-    const composerInput = document.getElementById('composer-input');
+
+    // Reply / Note mode toggle.
+    const setMode = (mode) => {
+      composerMode = mode;
+      $main.querySelector('#tab-reply').classList.toggle('active', mode === 'reply');
+      $main.querySelector('#tab-note').classList.toggle('active', mode === 'note');
+      $main.querySelector('.composer-wrap').classList.toggle('note-mode', mode === 'note');
+      composerInput.placeholder = mode === 'note'
+        ? 'Add an internal note (team only). Use @name to mention a teammate…'
+        : 'Type a reply, / for a snippet, or paste a screenshot… (Enter to send)';
+    };
+    $main.querySelector('#tab-reply').addEventListener('click', () => setMode('reply'));
+    $main.querySelector('#tab-note').addEventListener('click', () => setMode('note'));
+
+    // "/" canned-reply picker.
+    const menu = $main.querySelector('#snippet-menu');
+    let snippetIdx = 0;
+    const closeSnippets = () => { menu.hidden = true; menu.innerHTML = ''; };
+    const insertSnippet = (snip) => {
+      composerInput.value = (snip.body || '').replaceAll('{{name}}', c.contact_name || 'there');
+      closeSnippets();
+      composerInput.focus();
+    };
+    const refreshSnippets = () => {
+      const val = composerInput.value;
+      if (composerMode !== 'reply' || !val.startsWith('/')) return closeSnippets();
+      const q = val.slice(1).toLowerCase();
+      const matches = (state.canned || []).filter((s) => s.shortcut.includes(q) || (s.title || '').toLowerCase().includes(q)).slice(0, 6);
+      if (!matches.length) return closeSnippets();
+      snippetIdx = Math.min(snippetIdx, matches.length - 1);
+      menu.innerHTML = matches.map((s, i) => `<div class="snippet-item ${i === snippetIdx ? 'sel' : ''}" data-snip="${s.id}">
+        <b>/${esc(s.shortcut)}</b> ${esc(s.title || '')}<div class="snippet-body">${esc((s.body || '').slice(0, 80))}</div></div>`).join('');
+      menu.hidden = false;
+      menu._matches = matches;
+      menu.querySelectorAll('[data-snip]').forEach((el) => el.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        insertSnippet(matches.find((s) => s.id === Number(el.dataset.snip)));
+      }));
+    };
+
+    composerInput.addEventListener('input', () => { snippetIdx = 0; refreshSnippets(); });
     composerInput.addEventListener('keydown', (e) => {
+      if (!menu.hidden && menu._matches?.length) {
+        if (e.key === 'ArrowDown') { e.preventDefault(); snippetIdx = (snippetIdx + 1) % menu._matches.length; refreshSnippets(); return; }
+        if (e.key === 'ArrowUp') { e.preventDefault(); snippetIdx = (snippetIdx - 1 + menu._matches.length) % menu._matches.length; refreshSnippets(); return; }
+        if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); insertSnippet(menu._matches[snippetIdx]); return; }
+        if (e.key === 'Escape') { closeSnippets(); return; }
+      }
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
     });
+    composerInput.addEventListener('blur', () => setTimeout(closeSnippets, 150));
+
     // Paste a screenshot / image straight into the reply box.
     composerInput.addEventListener('paste', (e) => {
       const item = [...(e.clipboardData?.items || [])].find((i) => i.type.startsWith('image/'));
@@ -810,6 +881,7 @@
       e.target.value = '';
     });
     renderAttachPreview();
+    setMode(composerMode);
     composerInput.focus();
   }
 
@@ -1474,7 +1546,7 @@
   const DAY_ORDER = [['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday'], ['sun', 'Sunday']];
 
   async function renderSettings($main) {
-    const [s, bh, holidays, optOut, slaCfg, csatCfg] = await Promise.all([api('/settings'), api('/business-hours'), api('/holidays'), api('/opt-out-settings'), api('/sla-settings'), api('/csat-settings')]);
+    const [s, bh, holidays, optOut, slaCfg, csatCfg, canned] = await Promise.all([api('/settings'), api('/business-hours'), api('/holidays'), api('/opt-out-settings'), api('/sla-settings'), api('/csat-settings'), api('/canned-replies')]);
     $main.innerHTML = `<div class="page">
       <div class="page-header"><div><h2>Settings</h2><div class="sub">WhatsApp Cloud API & AI configuration</div></div></div>
       <div class="card">
@@ -1591,6 +1663,27 @@
         <label class="field">Thank-you message <textarea class="input" id="csat-thanks" rows="2">${esc(csatCfg.thanksMessage)}</textarea></label>
         <button class="btn" id="csat-save">Save survey settings</button>
       </div>
+
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <div><h3>Canned replies</h3><div class="muted" style="font-size:12.5px">Agents insert these in the composer by typing “/shortcut”. Use {{name}} for the contact's name.</div></div>
+          <button class="btn small" id="new-canned">+ Add snippet</button>
+        </div>
+        <table class="table">
+          <thead><tr><th>Shortcut</th><th>Title</th><th>Body</th><th></th></tr></thead>
+          <tbody>
+            ${canned.map((cr) => `<tr>
+              <td class="mono">/${esc(cr.shortcut)}</td>
+              <td>${esc(cr.title || '—')}</td>
+              <td style="max-width:360px">${esc(cr.body)}</td>
+              <td style="text-align:right">
+                <button class="btn small secondary" data-canned-edit="${cr.id}">Edit</button>
+                <button class="btn small danger" data-canned-del="${cr.id}">Delete</button>
+              </td>
+            </tr>`).join('') || '<tr><td colspan="4" class="muted">No snippets yet</td></tr>'}
+          </tbody>
+        </table>
+      </div>
     </div>`;
 
     document.getElementById('st-save').addEventListener('click', async () => {
@@ -1686,6 +1779,30 @@
         toast('Survey settings saved'); renderRoute();
       } catch (err) { toast(err.message, true); }
     });
+
+    const openCanned = (cr) => {
+      const m = modal(`
+        <h3>${cr ? 'Edit snippet' : 'Add snippet'}</h3>
+        <label class="field">Shortcut (typed after /) <input class="input" id="cr-shortcut" value="${esc(cr?.shortcut || '')}" ${cr ? 'disabled' : ''} placeholder="refund" /></label>
+        <label class="field">Title (optional) <input class="input" id="cr-title" value="${esc(cr?.title || '')}" placeholder="Refund policy" /></label>
+        <label class="field">Body <textarea class="input" id="cr-body" rows="4">${esc(cr?.body || '')}</textarea></label>
+        <div class="actions"><button class="btn secondary" id="cr-cancel">Cancel</button><button class="btn" id="cr-save">Save</button></div>`);
+      m.querySelector('#cr-cancel').addEventListener('click', () => m.remove());
+      m.querySelector('#cr-save').addEventListener('click', async () => {
+        const body = m.querySelector('#cr-body').value.trim();
+        const title = m.querySelector('#cr-title').value.trim();
+        try {
+          if (cr) await api('/canned-replies/' + cr.id, { method: 'PATCH', body: { title, body } });
+          else await api('/canned-replies', { method: 'POST', body: { shortcut: m.querySelector('#cr-shortcut').value.trim(), title, body } });
+          m.remove(); renderRoute();
+        } catch (err) { toast(err.message, true); }
+      });
+    };
+    document.getElementById('new-canned').addEventListener('click', () => openCanned(null));
+    $main.querySelectorAll('[data-canned-edit]').forEach((b) => b.addEventListener('click', () => openCanned(canned.find((cr) => cr.id === Number(b.dataset.cannedEdit)))));
+    $main.querySelectorAll('[data-canned-del]').forEach((b) => b.addEventListener('click', async () => {
+      await api('/canned-replies/' + b.dataset.cannedDel, { method: 'DELETE' }); renderRoute();
+    }));
   }
 
   // ---------- Router ----------

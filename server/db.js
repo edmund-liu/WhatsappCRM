@@ -235,6 +235,14 @@ CREATE TABLE IF NOT EXISTS holidays (
   created_at ${NOW_DEFAULT}
 );
 
+CREATE TABLE IF NOT EXISTS canned_replies (
+  id ${ID_PK},
+  shortcut TEXT NOT NULL UNIQUE,  -- typed after "/" in the composer
+  title TEXT,
+  body TEXT NOT NULL,             -- supports {{name}} personalization
+  created_at ${NOW_DEFAULT}
+);
+
 CREATE TABLE IF NOT EXISTS settings (
   key TEXT PRIMARY KEY,
   value TEXT
@@ -264,6 +272,7 @@ await addColumnIfMissing('templates', 'buttons', "buttons TEXT NOT NULL DEFAULT 
 await addColumnIfMissing('broadcasts', 'header_image_url', 'header_image_url TEXT');
 await addColumnIfMissing('messages', 'media_url', 'media_url TEXT');
 await addColumnIfMissing('messages', 'buttons', "buttons TEXT NOT NULL DEFAULT '[]'");
+await addColumnIfMissing('messages', 'mentions', "mentions TEXT NOT NULL DEFAULT '[]'"); // @mentioned user ids in internal notes
 await addColumnIfMissing('conversations', 'away_notified_on', 'away_notified_on TEXT');
 // SLA tracking
 await addColumnIfMissing('conversations', 'awaiting_since', `awaiting_since ${TS}`);
@@ -370,6 +379,18 @@ if (!(await getSetting('skills_seeded'))) {
     await db.prepare("UPDATE users SET skills = ? WHERE email = 'ben@example.com'").run(JSON.stringify(['shipping', 'technical']));
   }
   await setSetting('skills_seeded', '1');
+}
+
+// Seed a few canned replies once, so the "/" snippet picker isn't empty.
+if (!(await getSetting('canned_seeded'))) {
+  if ((await db.prepare('SELECT COUNT(*) AS c FROM canned_replies').get()).c === 0) {
+    const ins = db.prepare('INSERT INTO canned_replies (shortcut, title, body) VALUES (?, ?, ?)');
+    await ins.run('hi', 'Greeting', 'Hi {{name}}! 👋 Thanks for reaching out. How can I help you today?');
+    await ins.run('shipping', 'Shipping info', 'Standard shipping takes 3–5 business days and is free on orders over $50. 🚚');
+    await ins.run('returns', 'Return policy', 'We offer a 30-day return policy on all items. Reply with your order number and I can start the process for you.');
+    await ins.run('thanks', 'Sign-off', "You're welcome, {{name}}! Is there anything else I can help you with? 😊");
+  }
+  await setSetting('canned_seeded', '1');
 }
 
 export default db;
