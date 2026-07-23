@@ -639,6 +639,7 @@
             <button class="ctab" id="tab-note" data-mode="note">🔒 Note</button>
           </div>
           <div id="snippet-menu" class="snippet-menu" hidden></div>
+          <div id="mention-menu" class="snippet-menu" hidden></div>
           <div id="attach-preview"></div>
           <div class="composer">
             <button class="icon-btn" id="attach-btn" title="Attach an image or audio file (or paste a screenshot)">📎</button>
@@ -915,8 +916,9 @@
       $main.querySelector('#tab-note').classList.toggle('active', mode === 'note');
       $main.querySelector('.composer-wrap').classList.toggle('note-mode', mode === 'note');
       composerInput.placeholder = mode === 'note'
-        ? 'Add an internal note (team only). Use @name to mention a teammate…'
+        ? 'Add an internal note (team only). Type @ to tag a teammate…'
         : 'Type a reply, / for a snippet, or paste a screenshot… (Enter to send)';
+      if (mode !== 'note' && mentionMenu) closeMentions();
     };
     $main.querySelector('#tab-reply').addEventListener('click', () => setMode('reply'));
     $main.querySelector('#tab-note').addEventListener('click', () => setMode('note'));
@@ -947,8 +949,68 @@
       }));
     };
 
-    composerInput.addEventListener('input', () => { snippetIdx = 0; refreshSnippets(); });
+    // "@" mention picker — active in Note mode; suggests teammates to tag.
+    const mentionMenu = $main.querySelector('#mention-menu');
+    let mentionIdx = 0;
+    const STATUS_DOT = { online: 'on', away: 'away', offline: 'off' };
+    const closeMentions = () => { mentionMenu.hidden = true; mentionMenu.innerHTML = ''; mentionMenu._matches = null; };
+    // Find the "@token" the caret is sitting in (start-of-line or after whitespace,
+    // no whitespace between the @ and the caret). Returns { query, start } or null.
+    const activeMention = () => {
+      const pos = composerInput.selectionStart ?? composerInput.value.length;
+      const before = composerInput.value.slice(0, pos);
+      const m = before.match(/(?:^|\s)@([\w.]*)$/);
+      if (!m) return null;
+      return { query: m[1].toLowerCase(), start: pos - m[1].length - 1 };
+    };
+    const insertMention = (user) => {
+      const info = activeMention();
+      if (!info) return closeMentions();
+      const first = user.name.split(/\s+/)[0];
+      const val = composerInput.value;
+      const after = val.slice(composerInput.selectionStart ?? val.length);
+      const before = val.slice(0, info.start);
+      composerInput.value = `${before}@${first} ${after}`;
+      const caret = before.length + first.length + 2;
+      composerInput.setSelectionRange(caret, caret);
+      closeMentions();
+      composerInput.focus();
+    };
+    const refreshMentions = () => {
+      if (composerMode !== 'note') return closeMentions();
+      const info = activeMention();
+      if (!info) return closeMentions();
+      const q = info.query;
+      const matches = (state.users || [])
+        .filter((u) => u.is_active && u.id !== state.user.id)
+        .filter((u) => !q || u.name.toLowerCase().includes(q) || (u.email || '').toLowerCase().startsWith(q))
+        .slice(0, 6);
+      if (!matches.length) return closeMentions();
+      mentionIdx = Math.min(mentionIdx, matches.length - 1);
+      mentionMenu.innerHTML = matches.map((u, i) => `<div class="snippet-item ${i === mentionIdx ? 'sel' : ''}" data-uid="${u.id}">
+        <span class="status-dot ${STATUS_DOT[u.status] || 'off'}"></span> <b>${esc(u.name)}</b>
+        <span class="muted" style="font-size:12px">${esc(u.role || '')}${u.status && u.status !== 'online' ? ' · ' + esc(u.status) : ''}</span></div>`).join('');
+      mentionMenu.hidden = false;
+      mentionMenu._matches = matches;
+      mentionMenu.querySelectorAll('[data-uid]').forEach((el) => el.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        insertMention(matches.find((u) => u.id === Number(el.dataset.uid)));
+      }));
+    };
+
+    composerInput.addEventListener('input', () => { snippetIdx = 0; mentionIdx = 0; refreshSnippets(); refreshMentions(); });
+    composerInput.addEventListener('keyup', (e) => {
+      // Caret moves (arrows/click) don't fire "input", so re-check the mention token.
+      if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) refreshMentions();
+    });
+    composerInput.addEventListener('click', refreshMentions);
     composerInput.addEventListener('keydown', (e) => {
+      if (!mentionMenu.hidden && mentionMenu._matches?.length) {
+        if (e.key === 'ArrowDown') { e.preventDefault(); mentionIdx = (mentionIdx + 1) % mentionMenu._matches.length; refreshMentions(); return; }
+        if (e.key === 'ArrowUp') { e.preventDefault(); mentionIdx = (mentionIdx - 1 + mentionMenu._matches.length) % mentionMenu._matches.length; refreshMentions(); return; }
+        if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); insertMention(mentionMenu._matches[mentionIdx]); return; }
+        if (e.key === 'Escape') { closeMentions(); return; }
+      }
       if (!menu.hidden && menu._matches?.length) {
         if (e.key === 'ArrowDown') { e.preventDefault(); snippetIdx = (snippetIdx + 1) % menu._matches.length; refreshSnippets(); return; }
         if (e.key === 'ArrowUp') { e.preventDefault(); snippetIdx = (snippetIdx - 1 + menu._matches.length) % menu._matches.length; refreshSnippets(); return; }
@@ -957,7 +1019,7 @@
       }
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
     });
-    composerInput.addEventListener('blur', () => setTimeout(closeSnippets, 150));
+    composerInput.addEventListener('blur', () => setTimeout(() => { closeSnippets(); closeMentions(); }, 150));
 
     // Paste a screenshot / image straight into the reply box.
     composerInput.addEventListener('paste', (e) => {
