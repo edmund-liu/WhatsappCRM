@@ -96,6 +96,18 @@ export const SQL = {
   epoch: (col) => DIALECT === 'pg' ? `EXTRACT(EPOCH FROM ${col})` : `CAST(strftime('%s', ${col}) AS INTEGER)`,
 };
 
+// Settings are read constantly (auth, SLA, CSAT, business hours, sandbox,
+// webhook + AI keys, session-window checks) but change rarely. On Postgres —
+// where every query is a network round-trip — re-fetching them on each request
+// dominated latency, so cache them in-process with a short TTL. Writes are
+// write-through, so the writing instance is always fresh; the TTL bounds
+// cross-instance staleness on serverless to a few seconds, which config
+// tolerates. Volatile keys (the round-robin cursor) bypass the cache so
+// assignment stays correct.
+const SETTINGS_TTL_MS = 5000;
+const settingsCache = new Map(); // key -> { value, exp }
+const isVolatileSetting = (key) => key.startsWith('round_robin_cursor');
+
 // ---------- Schema ----------
 const ID_PK = DIALECT === 'pg' ? 'INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY' : 'INTEGER PRIMARY KEY AUTOINCREMENT';
 const NOW_DEFAULT = DIALECT === 'pg' ? 'TIMESTAMPTZ NOT NULL DEFAULT NOW()' : "TEXT NOT NULL DEFAULT (datetime('now'))";
@@ -323,13 +335,21 @@ export function computeParamMap(body) {
 }
 
 export async function getSetting(key, fallback = null) {
+  if (!isVolatileSetting(key)) {
+    const hit = settingsCache.get(key);
+    if (hit && hit.exp > Date.now()) return hit.value ?? fallback;
+  }
   const row = await db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
-  return row ? row.value : fallback;
+  const value = row ? row.value : null;
+  if (!isVolatileSetting(key)) settingsCache.set(key, { value, exp: Date.now() + SETTINGS_TTL_MS });
+  return value ?? fallback;
 }
 
 export async function setSetting(key, value) {
+  const v = value == null ? null : String(value);
   await db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
-    .run(key, value == null ? null : String(value));
+    .run(key, v);
+  if (!isVolatileSetting(key)) settingsCache.set(key, { value: v, exp: Date.now() + SETTINGS_TTL_MS });
 }
 
 // Keep param_map in sync with bodies (covers seeds and older rows).

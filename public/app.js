@@ -440,13 +440,26 @@
     state._metaJson = metaSnapshotOf(state.activeConv);
   }
 
+  // Team list, templates and canned replies rarely change but are needed to
+  // render the inbox synchronously. Fetch them once, then refresh in the
+  // background — so clicking a conversation or switching filters doesn't block
+  // on three extra round-trips every time (a big win on Postgres/serverless).
+  async function ensureInboxRefData() {
+    const first = !state.users || !state.templates || !state.canned;
+    const load = async () => {
+      const [users, templates, canned] = await Promise.all([
+        api('/users').catch(() => state.users || []),
+        api('/templates').catch(() => state.templates || []),
+        api('/canned-replies').catch(() => state.canned || []),
+      ]);
+      state.users = users; state.templates = templates; state.canned = canned;
+    };
+    if (first) await load();          // block only when we have nothing to show
+    else load().catch(() => {});      // otherwise refresh without blocking
+  }
+
   async function renderInbox($main) {
-    // Cache the team list and templates so the action bar / template-send
-    // fallback render synchronously (no async fill-in flicker). Refreshed on
-    // each full render.
-    try { state.users = await api('/users'); } catch { state.users = state.users || []; }
-    try { state.templates = await api('/templates'); } catch { state.templates = state.templates || []; }
-    try { state.canned = await api('/canned-replies'); } catch { state.canned = state.canned || []; }
+    await ensureInboxRefData();
     await loadConversations();
     if (state.activeConvId && !state.activeConv) await loadMessages(state.activeConvId).catch(() => { state.activeConvId = null; });
     takeSnapshots();

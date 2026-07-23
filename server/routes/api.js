@@ -251,8 +251,7 @@ router.get('/conversations', async (req, res) => {
     WHERE ${where}
     ORDER BY cv.last_message_at DESC NULLS LAST
   `).all(...params);
-  const slaConfig = await getSlaConfig();
-  const { scale: csatScale } = await getCsatConfig();
+  const [slaConfig, { scale: csatScale }] = await Promise.all([getSlaConfig(), getCsatConfig()]);
   res.json(rows.map((r) => ({ ...r, sla: slaStatusFor(r, slaConfig), csat_scale: csatScale })));
 });
 
@@ -266,14 +265,14 @@ router.get('/conversations/:id', async (req, res) => {
     WHERE cv.id = ?
   `).get(req.params.id);
   if (!conv) return res.status(404).json({ error: 'Conversation not found' });
-  const session = await getSessionWindowStatus(conv.id);
-  const sla = slaStatusFor(conv, await getSlaConfig());
-  const { scale: csatScale } = await getCsatConfig();
+  const [session, slaConfig, { scale: csatScale }, fields] = await Promise.all([
+    getSessionWindowStatus(conv.id), getSlaConfig(), getCsatConfig(), getContactFields(),
+  ]);
   res.json({
     ...conv, contact_tags: JSON.parse(conv.contact_tags),
     contact_attributes: JSON.parse(conv.contact_attributes || '{}'),
-    fields: await getContactFields(),
-    session, sla, csat_scale: csatScale,
+    fields,
+    session, sla: slaStatusFor(conv, slaConfig), csat_scale: csatScale,
   });
 });
 
