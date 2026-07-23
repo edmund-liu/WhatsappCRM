@@ -208,8 +208,10 @@
             <div class="name">${esc(state.user.name)}</div>
             <div class="muted">${esc(state.user.role)}</div>
             <div class="row">
-              <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
-                <input type="checkbox" id="avail-toggle" ${state.user.available ? 'checked' : ''}/> Available
+              <label class="status-toggle" title="When offline, you can't be assigned chats and can't assign conversations">
+                <input type="checkbox" id="avail-toggle" ${state.user.available ? 'checked' : ''}/>
+                <span class="status-dot ${state.user.available ? 'on' : 'off'}"></span>
+                ${state.user.available ? 'Online' : 'Offline'}
               </label>
               <button class="link-btn" id="logout-btn">Sign out</button>
             </div>
@@ -224,7 +226,9 @@
       await api('/me/availability', { method: 'PATCH', body: { available: e.target.checked } });
       state.user.available = e.target.checked ? 1 : 0;
       localStorage.setItem('user', JSON.stringify(state.user));
-      toast(e.target.checked ? 'You are available for new chats' : 'You are away — no new chats will be assigned');
+      toast(e.target.checked ? 'You are online — chats can be assigned to you' : 'You are offline — no new chats will be assigned and you cannot assign conversations');
+      // Re-render so the assignment dropdown enables/disables to match status.
+      renderShell(); renderRoute();
     });
     document.getElementById('sim-fab').addEventListener('click', () => { state.simOpen = !state.simOpen; renderSim(); });
     renderSim();
@@ -515,10 +519,11 @@
             ${csatBadgeHtml(c)}
             ${c.required_skill ? `<span class="badge amber">🏷 ${esc(c.required_skill)}</span>` : ''}
             ${c.ai_enabled ? `<span class="badge purple">🤖 ${esc(c.ai_agent_name)}</span>` : ''}
-            <select class="input" id="assign-select" style="width:auto;padding:5px 8px">
+            <select class="input" id="assign-select" style="width:auto;padding:5px 8px" ${state.user.available ? '' : 'disabled title="You are offline — go online to assign conversations"'}>
               <option value="">Unassigned</option>
-              ${users.map((u) => `<option value="${u.id}" ${u.id === c.assigned_user_id ? 'selected' : ''}>${esc(u.name)}${u.available ? '' : ' (away)'}</option>`).join('')}
+              ${users.map((u) => `<option value="${u.id}" ${u.id === c.assigned_user_id ? 'selected' : ''}>${esc(u.name)}${u.available ? '' : ' (offline)'}</option>`).join('')}
             </select>
+            ${state.user.available ? '' : '<span class="badge gray" title="Go online to assign">🔴 offline</span>'}
             <button class="btn small secondary" id="ai-toggle">${c.ai_enabled ? 'Disable AI' : 'Enable AI'}</button>
             ${c.status !== 'resolved'
               ? '<button class="btn small" id="resolve-btn">✓ Resolve</button>'

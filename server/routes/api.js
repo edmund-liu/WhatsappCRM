@@ -443,6 +443,9 @@ router.patch('/conversations/:id', async (req, res) => {
     if (status === 'resolved') await maybeSendSurvey(conv.id).catch((err) => console.error('CSAT send failed:', err.message));
   }
   if (assigned_user_id !== undefined) {
+    // Offline agents can't assign conversations (they're not working).
+    const me = await db.prepare('SELECT available FROM users WHERE id = ?').get(req.user.id);
+    if (!me?.available) return res.status(403).json({ error: "You're offline — go online to assign conversations." });
     await assignConversation(conv.id, assigned_user_id || null, { by: req.user.name });
   }
   if (ai_agent_id !== undefined || ai_enabled !== undefined) {
