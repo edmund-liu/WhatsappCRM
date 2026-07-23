@@ -684,6 +684,12 @@
           <div class="muted mono">+${esc(c.wa_id)}</div>
           <div style="margin-top:6px">${c.contact_tags.map((t) => `<span class="badge green">${esc(t)}</span>`).join(' ')}</div>
         </div>
+        ${(() => {
+          const fields = c.fields || [];
+          const attrs = c.contact_attributes || {};
+          const rows = fields.filter((f) => attrs[f.key]).map((f) => `<div class="cp-row"><span>${esc(f.label)}</span><span>${f.type === 'url' ? `<a href="${esc(attrs[f.key])}" target="_blank" rel="noopener">link</a>` : esc(attrs[f.key])}</span></div>`);
+          return rows.length ? `<div class="cp-section"><div class="cp-label">Account details</div>${rows.join('')}</div>` : '';
+        })()}
         ${lastSummary ? `<div class="cp-section"><div class="cp-label">Latest handoff summary</div>
           <div class="cp-summary">${esc(lastSummary.body.replace(/^📋 Handoff summary — /, ''))}</div></div>` : ''}
         <div class="cp-section">
@@ -907,7 +913,7 @@
 
   // ---------- Contacts ----------
   async function renderContacts($main) {
-    const contacts = await api('/contacts');
+    const [contacts, fields] = await Promise.all([api('/contacts'), api('/contact-fields')]);
     $main.innerHTML = `<div class="page">
       <div class="page-header">
         <div><h2>Contacts</h2><div class="sub">${contacts.length} contacts · tag them to build broadcast audiences</div></div>
@@ -943,13 +949,21 @@
         <label class="field">Name <input class="input" id="ct-name" value="${esc(contact?.name || '')}" /></label>
         <label class="field">Phone (digits, with country code) <input class="input" id="ct-phone" value="${esc(contact?.wa_id || '')}" ${contact ? 'disabled' : ''} /></label>
         <label class="field">Tags (comma separated) <input class="input" id="ct-tags" value="${esc((contact?.tags || []).join(', '))}" placeholder="vip, newsletter" /></label>
+        ${fields.length ? `<div class="cp-label" style="margin:10px 0 6px">Custom fields</div>${fields.map((f) => {
+          const val = (contact?.attributes || {})[f.key] || '';
+          const itype = f.type === 'number' ? 'number' : f.type === 'date' ? 'date' : f.type === 'url' ? 'url' : 'text';
+          return `<label class="field">${esc(f.label)} <input class="input ct-attr" data-key="${esc(f.key)}" type="${itype}" value="${esc(val)}" /></label>`;
+        }).join('')}` : ''}
         ${contact ? `<label style="display:flex;gap:8px;align-items:center"><input type="checkbox" id="ct-optout" ${contact.opted_out ? 'checked' : ''}/> Opted out of broadcasts</label>` : ''}
         <div class="actions"><button class="btn secondary" id="ct-cancel">Cancel</button><button class="btn" id="ct-save">Save</button></div>`);
       m.querySelector('#ct-cancel').addEventListener('click', () => m.remove());
       m.querySelector('#ct-save').addEventListener('click', async () => {
+        const attributes = {};
+        m.querySelectorAll('.ct-attr').forEach((i) => { attributes[i.dataset.key] = i.value.trim(); });
         const body = {
           name: m.querySelector('#ct-name').value.trim(),
           tags: m.querySelector('#ct-tags').value.split(',').map((t) => t.trim()).filter(Boolean),
+          attributes,
         };
         try {
           if (contact) {
@@ -1546,7 +1560,7 @@
   const DAY_ORDER = [['mon', 'Monday'], ['tue', 'Tuesday'], ['wed', 'Wednesday'], ['thu', 'Thursday'], ['fri', 'Friday'], ['sat', 'Saturday'], ['sun', 'Sunday']];
 
   async function renderSettings($main) {
-    const [s, bh, holidays, optOut, slaCfg, csatCfg, canned] = await Promise.all([api('/settings'), api('/business-hours'), api('/holidays'), api('/opt-out-settings'), api('/sla-settings'), api('/csat-settings'), api('/canned-replies')]);
+    const [s, bh, holidays, optOut, slaCfg, csatCfg, canned, contactFields] = await Promise.all([api('/settings'), api('/business-hours'), api('/holidays'), api('/opt-out-settings'), api('/sla-settings'), api('/csat-settings'), api('/canned-replies'), api('/contact-fields')]);
     $main.innerHTML = `<div class="page">
       <div class="page-header"><div><h2>Settings</h2><div class="sub">WhatsApp Cloud API & AI configuration</div></div></div>
       <div class="card">
@@ -1684,6 +1698,23 @@
           </tbody>
         </table>
       </div>
+
+      <div class="card">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+          <div><h3>Custom contact fields</h3><div class="muted" style="font-size:12.5px">Store account details on each contact (plan, balance, account #…). Shown in the contact panel and given to AI agents so they can answer account questions.</div></div>
+          <button class="btn small" id="cf-add">+ Add field</button>
+        </div>
+        <div id="cf-list">
+          ${contactFields.map((f) => `<div class="hours-row cf-row" data-key="${esc(f.key)}">
+            <input class="input cf-label" value="${esc(f.label)}" placeholder="Field label" style="flex:1" />
+            <select class="input cf-type" style="width:120px">
+              ${['text', 'number', 'date', 'url'].map((t) => `<option value="${t}" ${f.type === t ? 'selected' : ''}>${t}</option>`).join('')}
+            </select>
+            <button class="btn small danger cf-del" type="button">✕</button>
+          </div>`).join('')}
+        </div>
+        <button class="btn mt" id="cf-save">Save fields</button>
+      </div>
     </div>`;
 
     document.getElementById('st-save').addEventListener('click', async () => {
@@ -1803,6 +1834,31 @@
     $main.querySelectorAll('[data-canned-del]').forEach((b) => b.addEventListener('click', async () => {
       await api('/canned-replies/' + b.dataset.cannedDel, { method: 'DELETE' }); renderRoute();
     }));
+
+    // Custom contact fields
+    const cfList = document.getElementById('cf-list');
+    const addCfRow = (f) => {
+      const row = document.createElement('div');
+      row.className = 'hours-row cf-row';
+      row.innerHTML = `
+        <input class="input cf-label" value="${esc(f?.label || '')}" placeholder="Field label" style="flex:1" />
+        <select class="input cf-type" style="width:120px">${['text', 'number', 'date', 'url'].map((t) => `<option value="${t}" ${f?.type === t ? 'selected' : ''}>${t}</option>`).join('')}</select>
+        <button class="btn small danger cf-del" type="button">✕</button>`;
+      row.querySelector('.cf-del').addEventListener('click', () => row.remove());
+      cfList.appendChild(row);
+    };
+    cfList.querySelectorAll('.cf-del').forEach((b) => b.addEventListener('click', (e) => e.target.closest('.cf-row').remove()));
+    document.getElementById('cf-add').addEventListener('click', () => addCfRow(null));
+    document.getElementById('cf-save').addEventListener('click', async () => {
+      const fields = [...cfList.querySelectorAll('.cf-row')].map((row) => ({
+        label: row.querySelector('.cf-label').value.trim(),
+        type: row.querySelector('.cf-type').value,
+      })).filter((f) => f.label);
+      try {
+        await api('/contact-fields', { method: 'PUT', body: { fields } });
+        toast('Custom fields saved'); renderRoute();
+      } catch (err) { toast(err.message, true); }
+    });
   }
 
   // ---------- Router ----------

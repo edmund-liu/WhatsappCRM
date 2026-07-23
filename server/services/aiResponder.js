@@ -35,7 +35,18 @@ function wantsHuman(text, agent) {
   return keywords.some((k) => k && lower.includes(String(k).toLowerCase()));
 }
 
-async function claudeReply(agent, history, contactName) {
+// Turn a contact's custom-field values + any external data into a context
+// block the AI can answer account-specific questions from.
+export function contactContextBlock(contact) {
+  const lines = [];
+  let attrs = {};
+  try { attrs = JSON.parse(contact?.attributes || '{}'); } catch { /* ignore */ }
+  for (const [k, v] of Object.entries(attrs)) if (v) lines.push(`- ${k}: ${v}`);
+  if (!lines.length) return '';
+  return `\n\nKnown account details for this customer (use these to answer their questions directly instead of asking; never invent details beyond this list):\n${lines.join('\n')}`;
+}
+
+async function claudeReply(agent, history, contact) {
   const apiKey = (await getSetting('anthropic_api_key')) || process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return null;
   const messages = history.map((m) => ({
@@ -52,7 +63,7 @@ async function claudeReply(agent, history, contactName) {
     body: JSON.stringify({
       model: agent.model,
       max_tokens: 512,
-      system: `${agent.system_prompt}\n\nThe customer's name is ${contactName || 'unknown'}. You are replying inside WhatsApp: keep answers concise and conversational. If you decide the customer needs a human, include the token [HANDOFF] at the end of your reply.`,
+      system: `${agent.system_prompt}\n\nThe customer's name is ${contact?.name || 'unknown'}. You are replying inside WhatsApp: keep answers concise and conversational.${contactContextBlock(contact)}\n\nIf you decide the customer needs a human, include the token [HANDOFF] at the end of your reply.`,
       messages,
     }),
   });
@@ -171,7 +182,7 @@ export async function maybeAutoReply(conversationId, inboundText) {
 
   let reply;
   try {
-    reply = await claudeReply(agent, history, contact?.name);
+    reply = await claudeReply(agent, history, contact);
   } catch (err) {
     console.error('AI agent error, using fallback:', err.message);
   }

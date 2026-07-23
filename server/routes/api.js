@@ -190,11 +190,22 @@ router.post('/contacts/import', express.raw({ type: () => true, limit: '5mb' }),
 router.patch('/contacts/:id', async (req, res) => {
   const contact = await db.prepare('SELECT * FROM contacts WHERE id = ?').get(req.params.id);
   if (!contact) return res.status(404).json({ error: 'Contact not found' });
-  const { name, tags, opted_out } = req.body || {};
-  await db.prepare('UPDATE contacts SET name = ?, tags = ?, opted_out = ? WHERE id = ?').run(
+  const { name, tags, opted_out, attributes } = req.body || {};
+  // Merge provided custom-field values into the existing attributes object.
+  let attrs = contact.attributes;
+  if (attributes && typeof attributes === 'object') {
+    let current = {};
+    try { current = JSON.parse(contact.attributes || '{}'); } catch { /* ignore */ }
+    for (const [k, v] of Object.entries(attributes)) {
+      if (v === '' || v == null) delete current[k]; else current[k] = String(v);
+    }
+    attrs = JSON.stringify(current);
+  }
+  await db.prepare('UPDATE contacts SET name = ?, tags = ?, opted_out = ?, attributes = ? WHERE id = ?').run(
     name ?? contact.name,
     Array.isArray(tags) ? JSON.stringify(tags) : contact.tags,
     opted_out === undefined ? contact.opted_out : (opted_out ? 1 : 0),
+    attrs,
     contact.id
   );
   res.json({ ok: true });
@@ -234,7 +245,7 @@ router.get('/conversations', async (req, res) => {
 
 router.get('/conversations/:id', async (req, res) => {
   const conv = await db.prepare(`
-    SELECT cv.*, c.name AS contact_name, c.wa_id, c.tags AS contact_tags, u.name AS assigned_name, a.name AS ai_agent_name
+    SELECT cv.*, c.name AS contact_name, c.wa_id, c.tags AS contact_tags, c.attributes AS contact_attributes, u.name AS assigned_name, a.name AS ai_agent_name
     FROM conversations cv
     JOIN contacts c ON c.id = cv.contact_id
     LEFT JOIN users u ON u.id = cv.assigned_user_id
@@ -245,7 +256,12 @@ router.get('/conversations/:id', async (req, res) => {
   const session = await getSessionWindowStatus(conv.id);
   const sla = slaStatusFor(conv, await getSlaConfig());
   const { scale: csatScale } = await getCsatConfig();
-  res.json({ ...conv, contact_tags: JSON.parse(conv.contact_tags), session, sla, csat_scale: csatScale });
+  res.json({
+    ...conv, contact_tags: JSON.parse(conv.contact_tags),
+    contact_attributes: JSON.parse(conv.contact_attributes || '{}'),
+    fields: await getContactFields(),
+    session, sla, csat_scale: csatScale,
+  });
 });
 
 router.get('/conversations/:id/messages', async (req, res) => {
@@ -727,6 +743,33 @@ router.put('/csat-settings', requireAdmin, async (req, res) => {
   if (message !== undefined && !String(message).trim()) return res.status(400).json({ error: 'Survey message cannot be empty' });
   await setCsatConfig({ enabled, scale, message, thanksMessage });
   res.json({ ok: true });
+});
+
+// ---------- Custom contact fields ----------
+// Admin-defined field definitions; values live in contacts.attributes.
+async function getContactFields() {
+  try { return JSON.parse(await getSetting('contact_fields', '') || '[]'); } catch { return []; }
+}
+
+router.get('/contact-fields', async (req, res) => {
+  res.json(await getContactFields());
+});
+
+router.put('/contact-fields', requireAdmin, async (req, res) => {
+  const fields = Array.isArray(req.body?.fields) ? req.body.fields : [];
+  const clean = [];
+  const seen = new Set();
+  for (const f of fields) {
+    const label = String(f?.label || '').trim();
+    if (!label) continue;
+    const key = String(f?.key || label).toLowerCase().trim().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '');
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const type = ['text', 'number', 'date', 'url'].includes(f?.type) ? f.type : 'text';
+    clean.push({ key, label, type });
+  }
+  await setSetting('contact_fields', JSON.stringify(clean));
+  res.json({ ok: true, fields: clean });
 });
 
 // ---------- Analytics ----------
