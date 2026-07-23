@@ -13,6 +13,7 @@ import { emit } from './events.js';
 import { sendText } from './whatsapp.js';
 import { roundRobinAssign, addSystemNote } from './assignment.js';
 import { recordResponse } from './sla.js';
+import { fetchExternalData, externalDataContextBlock } from './externalData.js';
 
 // Pick the AI agent for a new conversation: prefer one whose skills match the
 // detected topic, then a generalist (no skills listed), then any auto-assign
@@ -53,6 +54,7 @@ async function claudeReply(agent, history, contact) {
     role: m.direction === 'in' ? 'user' : 'assistant',
     content: m.body || '[media message]',
   }));
+  const externalBlock = externalDataContextBlock(await fetchExternalData(contact));
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
@@ -63,7 +65,7 @@ async function claudeReply(agent, history, contact) {
     body: JSON.stringify({
       model: agent.model,
       max_tokens: 512,
-      system: `${agent.system_prompt}\n\nThe customer's name is ${contact?.name || 'unknown'}. You are replying inside WhatsApp: keep answers concise and conversational.${contactContextBlock(contact)}\n\nIf you decide the customer needs a human, include the token [HANDOFF] at the end of your reply.`,
+      system: `${agent.system_prompt}\n\nThe customer's name is ${contact?.name || 'unknown'}. You are replying inside WhatsApp: keep answers concise and conversational.${contactContextBlock(contact)}${externalBlock}\n\nIf you decide the customer needs a human, include the token [HANDOFF] at the end of your reply.`,
       messages,
     }),
   });

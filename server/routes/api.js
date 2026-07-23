@@ -18,6 +18,7 @@ import { getSessionWindowStatus } from '../services/sessionWindow.js';
 import { getOptOutConfig, setOptOutConfig } from '../services/optOut.js';
 import { getSlaConfig, setSlaConfig, slaStatusFor, recordResponse } from '../services/sla.js';
 import { getCsatConfig, setCsatConfig, maybeSendSurvey } from '../services/csat.js';
+import { fetchExternalData, isExternalDataConfigured } from '../services/externalData.js';
 import { SERVERLESS } from '../runtime.js';
 
 const router = Router();
@@ -331,6 +332,17 @@ router.post('/conversations/:id/messages', async (req, res) => {
   }
 });
 
+// Live customer data from the configured webhook (lazy — the panel fetches
+// this after opening so the main conversation load stays fast).
+router.get('/conversations/:id/external-data', async (req, res) => {
+  const conv = await db.prepare('SELECT contact_id FROM conversations WHERE id = ?').get(req.params.id);
+  if (!conv) return res.status(404).json({ error: 'Conversation not found' });
+  if (!(await isExternalDataConfigured())) return res.json({ configured: false });
+  const contact = await db.prepare('SELECT * FROM contacts WHERE id = ?').get(conv.contact_id);
+  const data = await fetchExternalData(contact, { force: req.query.refresh === '1' });
+  res.json({ configured: true, data });
+});
+
 // Internal note — team-only, never sent to the customer. @mentions of active
 // teammates by name are detected and stored so a mentions filter can surface
 // them for the person tagged.
@@ -628,17 +640,24 @@ router.get('/settings', requireAdmin, async (req, res) => {
     wa_access_token_set: Boolean(await getSetting('wa_access_token')),
     wa_verify_token: await getSetting('wa_verify_token', ''),
     anthropic_api_key_set: Boolean((await getSetting('anthropic_api_key')) || process.env.ANTHROPIC_API_KEY),
+    data_webhook_url: await getSetting('data_webhook_url', ''),
+    data_webhook_secret_set: Boolean(await getSetting('data_webhook_secret')),
   });
 });
 
 router.put('/settings', requireAdmin, async (req, res) => {
-  const { sandbox_mode, wa_phone_number_id, wa_waba_id, wa_access_token, wa_verify_token, anthropic_api_key } = req.body || {};
+  const { sandbox_mode, wa_phone_number_id, wa_waba_id, wa_access_token, wa_verify_token, anthropic_api_key, data_webhook_url, data_webhook_secret } = req.body || {};
   if (sandbox_mode !== undefined) await setSetting('sandbox_mode', sandbox_mode ? '1' : '0');
   if (wa_phone_number_id !== undefined) await setSetting('wa_phone_number_id', wa_phone_number_id);
   if (wa_waba_id !== undefined) await setSetting('wa_waba_id', wa_waba_id);
   if (wa_access_token) await setSetting('wa_access_token', wa_access_token);
   if (wa_verify_token !== undefined) await setSetting('wa_verify_token', wa_verify_token);
   if (anthropic_api_key) await setSetting('anthropic_api_key', anthropic_api_key);
+  if (data_webhook_url !== undefined) {
+    if (data_webhook_url && !/^https?:\/\//.test(data_webhook_url)) return res.status(400).json({ error: 'Data webhook URL must be an http(s) URL' });
+    await setSetting('data_webhook_url', data_webhook_url);
+  }
+  if (data_webhook_secret !== undefined) await setSetting('data_webhook_secret', data_webhook_secret);
   res.json({ ok: true });
 });
 

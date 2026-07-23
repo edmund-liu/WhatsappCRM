@@ -438,6 +438,7 @@
     const scroll = $main.querySelector('.thread-msgs');
     if (scroll) scroll.scrollTop = scroll.scrollHeight;
     tickSla();
+    if (state.infoOpen) loadExternalData();
   }
 
   // Background refresh for the inbox: updates only the regions whose data
@@ -477,7 +478,7 @@
         wireThreadHeader($main);
       }
       const panel = $main.querySelector('.contact-panel');
-      if (panel) panel.outerHTML = renderContactPanel();
+      if (panel) { panel.outerHTML = renderContactPanel(); if (state.infoOpen) loadExternalData(); }
       // Skip while the agent is actively composing, so a session-window flip
       // never wipes an in-progress draft or attachment.
       const composerWrap = $main.querySelector('.composer-wrap');
@@ -667,6 +668,43 @@
 
   // Right-hand panel: who the customer is and the shape of the relationship,
   // so an agent taking over a chat has context at a glance.
+  // Live customer-data webhook results, loaded lazily so opening the panel is
+  // instant and a slow/absent backend never blocks the UI.
+  async function loadExternalData() {
+    const el = document.getElementById('cp-external');
+    if (!el || el.dataset.loaded === el.dataset.conv) return;
+    el.dataset.loaded = el.dataset.conv;
+    let out;
+    try { out = await api(`/conversations/${el.dataset.conv}/external-data`); } catch { return; }
+    if (!out.configured) return;
+    const d = out.data || {};
+    let rows;
+    if (d._error) {
+      rows = `<div class="muted" style="font-size:12px">${esc(d._error)} <button class="link-btn" id="cp-ext-retry">retry</button></div>`;
+    } else {
+      const parts = [];
+      if (d.summary) parts.push(`<div class="cp-summary" style="margin-bottom:6px">${esc(d.summary)}</div>`);
+      for (const [k, v] of Object.entries(d)) {
+        if (k === 'summary' || k.startsWith('_') || v == null) continue;
+        if (Array.isArray(v)) {
+          parts.push(`<div class="cp-row"><span>${esc(k)}</span><span>${v.length} item(s)</span></div>`);
+          v.slice(0, 5).forEach((it) => parts.push(`<div class="muted" style="font-size:12px;padding-left:6px">• ${esc(typeof it === 'object' ? Object.values(it).join(' · ') : it)}</div>`));
+        } else if (typeof v !== 'object') {
+          parts.push(`<div class="cp-row"><span>${esc(k)}</span><span>${esc(String(v))}</span></div>`);
+        }
+      }
+      rows = parts.join('') || '<div class="muted" style="font-size:12px">No data returned</div>';
+    }
+    el.innerHTML = `<div class="cp-label">Live account data</div>${rows}`;
+    el.hidden = false;
+    const retry = document.getElementById('cp-ext-retry');
+    if (retry) retry.addEventListener('click', async () => {
+      el.dataset.loaded = ''; el.hidden = true;
+      try { await api(`/conversations/${el.dataset.conv}/external-data?refresh=1`); } catch { /* ignore */ }
+      loadExternalData();
+    });
+  }
+
   function renderContactPanel() {
     const c = state.activeConv;
     const msgs = state.messages.filter((m) => m.sender_type !== 'system');
@@ -690,6 +728,7 @@
           const rows = fields.filter((f) => attrs[f.key]).map((f) => `<div class="cp-row"><span>${esc(f.label)}</span><span>${f.type === 'url' ? `<a href="${esc(attrs[f.key])}" target="_blank" rel="noopener">link</a>` : esc(attrs[f.key])}</span></div>`);
           return rows.length ? `<div class="cp-section"><div class="cp-label">Account details</div>${rows.join('')}</div>` : '';
         })()}
+        <div class="cp-section" id="cp-external" data-conv="${c.id}" hidden></div>
         ${lastSummary ? `<div class="cp-section"><div class="cp-label">Latest handoff summary</div>
           <div class="cp-summary">${esc(lastSummary.body.replace(/^📋 Handoff summary — /, ''))}</div></div>` : ''}
         <div class="cp-section">
@@ -1584,6 +1623,13 @@
         <label class="field">Anthropic API key ${s.anthropic_api_key_set ? '<span class="badge green">set</span>' : '<span class="badge gray">not set — rule-based fallback in use</span>'}
           <input class="input" id="st-anthropic" type="password" placeholder="sk-ant-…" /></label>
       </div>
+      <div class="card">
+        <h3 style="margin-bottom:4px">Live customer data webhook</h3>
+        <div class="muted" style="margin-bottom:12px">Optional. The CRM POSTs <span class="mono">{ wa_id, name }</span> to this URL and shows the JSON it returns (account, orders, balance…) in the contact panel — and gives it to AI agents so they answer from real data. Connect Shopify, your billing system, or any custom endpoint.</div>
+        <label class="field">Webhook URL <input class="input" id="st-datawebhook" value="${esc(s.data_webhook_url)}" placeholder="https://your-backend.example.com/whatsapp-lookup" /></label>
+        <label class="field">Shared secret ${s.data_webhook_secret_set ? '<span class="badge green">set</span>' : '<span class="badge gray">optional</span>'} — sent as the <span class="mono">X-Webhook-Secret</span> header
+          <input class="input" id="st-datasecret" type="password" placeholder="Paste to set/replace" /></label>
+      </div>
       <button class="btn" id="st-save">Save settings</button>
 
       <div class="card mt">
@@ -1726,6 +1772,8 @@
           wa_access_token: document.getElementById('st-token').value.trim() || undefined,
           wa_verify_token: document.getElementById('st-verify').value.trim(),
           anthropic_api_key: document.getElementById('st-anthropic').value.trim() || undefined,
+          data_webhook_url: document.getElementById('st-datawebhook').value.trim(),
+          data_webhook_secret: document.getElementById('st-datasecret').value.trim() || undefined,
         } });
         toast('Settings saved'); renderRoute();
       } catch (err) { toast(err.message, true); }
