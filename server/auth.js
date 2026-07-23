@@ -27,7 +27,7 @@ export async function requireAuth(req, res, next) {
   if (!token) return res.status(401).json({ error: 'Not authenticated' });
   try {
     const payload = jwt.verify(token, secret);
-    const user = await db.prepare('SELECT id, name, email, role, is_active, available FROM users WHERE id = ?').get(payload.id);
+    const user = await db.prepare('SELECT id, name, email, role, is_active, available, status FROM users WHERE id = ?').get(payload.id);
     if (!user || !user.is_active) return res.status(401).json({ error: 'Account disabled' });
     req.user = user;
     next();

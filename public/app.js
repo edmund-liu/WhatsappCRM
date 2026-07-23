@@ -194,7 +194,42 @@
     ['settings', '⚙️', 'Settings'],
   ];
 
+  const STATUS_HINT = {
+    online: 'Receiving new chats',
+    away: "Away — you won't get new chats, but can still assign",
+    offline: "Offline — no new chats and you can't assign",
+  };
+  const STATUS_CONFIRM = {
+    online: 'Go Online? You will start receiving new chat assignments (round-robin).',
+    away: "Set yourself Away? You won't be assigned new chats, but you can still reply and assign conversations.",
+    offline: "Go Offline? You won't be assigned new chats and you won't be able to assign conversations.",
+  };
+
+  // Secondary confirmation before every status change.
+  function confirmStatusChange(next) {
+    const m = modal(`
+      <h3>Change status to ${next.charAt(0).toUpperCase() + next.slice(1)}?</h3>
+      <p class="muted" style="margin-bottom:4px">${esc(STATUS_CONFIRM[next] || '')}</p>
+      <div class="actions">
+        <button class="btn secondary" id="sc-cancel">Cancel</button>
+        <button class="btn" id="sc-confirm">Confirm</button>
+      </div>`);
+    m.querySelector('#sc-cancel').addEventListener('click', () => m.remove());
+    m.querySelector('#sc-confirm').addEventListener('click', async () => {
+      try {
+        const out = await api('/me/status', { method: 'PATCH', body: { status: next } });
+        state.user.status = out.status;
+        state.user.available = out.available;
+        localStorage.setItem('user', JSON.stringify(state.user));
+        m.remove();
+        toast(`You are now ${next}`);
+        renderShell(); renderRoute();
+      } catch (err) { toast(err.message, true); }
+    });
+  }
+
   function renderShell() {
+    if (!state.user.status) state.user.status = state.user.available === 0 ? 'offline' : 'online';
     const isAdmin = state.user.role === 'admin';
     const nav = NAV.filter(([r]) => isAdmin || !['team', 'settings'].includes(r));
     $app.innerHTML = `
@@ -207,12 +242,12 @@
           <div class="me">
             <div class="name">${esc(state.user.name)}</div>
             <div class="muted">${esc(state.user.role)}</div>
-            <div class="row">
-              <label class="status-toggle" title="When offline, you can't be assigned chats and can't assign conversations">
-                <input type="checkbox" id="avail-toggle" ${state.user.available ? 'checked' : ''}/>
-                <span class="status-dot ${state.user.available ? 'on' : 'off'}"></span>
-                ${state.user.available ? 'Online' : 'Offline'}
-              </label>
+            <div class="status-pills">
+              ${[['online', 'Online', 'on'], ['away', 'Away', 'away'], ['offline', 'Offline', 'off']].map(([s, label, dot]) =>
+                `<button class="status-pill ${state.user.status === s ? 'active ' + dot : ''}" data-status="${s}"><span class="status-dot ${dot}"></span>${label}</button>`).join('')}
+            </div>
+            <div class="row" style="margin-top:8px">
+              <span class="muted" style="font-size:12px">${STATUS_HINT[state.user.status] || ''}</span>
               <button class="link-btn" id="logout-btn">Sign out</button>
             </div>
           </div>
@@ -222,14 +257,11 @@
       <button class="sim-fab" id="sim-fab">📱 Simulate customer</button>
       <div id="sim-panel-slot"></div>`;
     document.getElementById('logout-btn').addEventListener('click', logout);
-    document.getElementById('avail-toggle').addEventListener('change', async (e) => {
-      await api('/me/availability', { method: 'PATCH', body: { available: e.target.checked } });
-      state.user.available = e.target.checked ? 1 : 0;
-      localStorage.setItem('user', JSON.stringify(state.user));
-      toast(e.target.checked ? 'You are online — chats can be assigned to you' : 'You are offline — no new chats will be assigned and you cannot assign conversations');
-      // Re-render so the assignment dropdown enables/disables to match status.
-      renderShell(); renderRoute();
-    });
+    $app.querySelectorAll('[data-status]').forEach((b) => b.addEventListener('click', () => {
+      const next = b.dataset.status;
+      if (next === state.user.status) return;
+      confirmStatusChange(next);
+    }));
     document.getElementById('sim-fab').addEventListener('click', () => { state.simOpen = !state.simOpen; renderSim(); });
     renderSim();
   }
@@ -519,11 +551,11 @@
             ${csatBadgeHtml(c)}
             ${c.required_skill ? `<span class="badge amber">🏷 ${esc(c.required_skill)}</span>` : ''}
             ${c.ai_enabled ? `<span class="badge purple">🤖 ${esc(c.ai_agent_name)}</span>` : ''}
-            <select class="input" id="assign-select" style="width:auto;padding:5px 8px" ${state.user.available ? '' : 'disabled title="You are offline — go online to assign conversations"'}>
+            <select class="input" id="assign-select" style="width:auto;padding:5px 8px" ${state.user.status === 'offline' ? 'disabled title="You are offline — go online or away to assign conversations"' : ''}>
               <option value="">Unassigned</option>
-              ${users.map((u) => `<option value="${u.id}" ${u.id === c.assigned_user_id ? 'selected' : ''}>${esc(u.name)}${u.available ? '' : ' (offline)'}</option>`).join('')}
+              ${users.map((u) => `<option value="${u.id}" ${u.id === c.assigned_user_id ? 'selected' : ''}>${esc(u.name)}${u.status && u.status !== 'online' ? ' (' + u.status + ')' : ''}</option>`).join('')}
             </select>
-            ${state.user.available ? '' : '<span class="badge gray" title="Go online to assign">🔴 offline</span>'}
+            ${state.user.status === 'offline' ? '<span class="badge gray" title="Go online to assign">🔴 offline</span>' : ''}
             <button class="btn small secondary" id="ai-toggle">${c.ai_enabled ? 'Disable AI' : 'Enable AI'}</button>
             ${c.status !== 'resolved'
               ? '<button class="btn small" id="resolve-btn">✓ Resolve</button>'
@@ -1405,17 +1437,20 @@
       </div>
       <div class="card">
         <table class="table">
-          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Skills</th><th>Status</th><th>Round-robin</th><th></th></tr></thead>
+          <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Skills</th><th>Account</th><th>Presence</th><th></th></tr></thead>
           <tbody>
-            ${users.map((u) => `<tr>
+            ${users.map((u) => {
+              const st = u.status || (u.available ? 'online' : 'offline');
+              const stBadge = { online: '<span class="badge green">🟢 online</span>', away: '<span class="badge amber">🟡 away</span>', offline: '<span class="badge gray">🔴 offline</span>' }[st];
+              return `<tr>
               <td><span class="avatar" style="width:28px;height:28px;font-size:11px">${initials(u.name)}</span> <b>${esc(u.name)}</b></td>
               <td class="muted">${esc(u.email)}</td>
               <td><span class="badge ${u.role === 'admin' ? 'purple' : 'blue'}">${u.role}</span></td>
               <td>${(u.skills || []).map((s) => `<span class="badge amber">${esc(s)}</span>`).join(' ') || '<span class="muted">generalist</span>'}</td>
               <td>${u.is_active ? '<span class="badge green">active</span>' : '<span class="badge red">disabled</span>'}</td>
-              <td>${u.available && u.is_active ? '<span class="badge green">✓ available</span>' : '<span class="badge gray">away</span>'}</td>
+              <td>${u.is_active ? stBadge : '<span class="muted">—</span>'}${st === 'online' && u.is_active ? '' : '<div class="muted" style="font-size:11px">not in round-robin</div>'}</td>
               <td style="text-align:right"><button class="btn small secondary" data-edit="${u.id}">Edit</button></td>
-            </tr>`).join('')}
+            </tr>`; }).join('')}
           </tbody>
         </table>
       </div>

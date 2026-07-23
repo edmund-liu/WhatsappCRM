@@ -109,7 +109,8 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash TEXT NOT NULL,
   role TEXT NOT NULL DEFAULT 'agent' CHECK (role IN ('admin','agent')),
   is_active INTEGER NOT NULL DEFAULT 1,
-  available INTEGER NOT NULL DEFAULT 1,
+  available INTEGER NOT NULL DEFAULT 1,   -- kept in sync: 1 only when status = 'online'
+  status TEXT NOT NULL DEFAULT 'online',  -- online | away | offline (away & offline both leave round-robin)
   skills TEXT NOT NULL DEFAULT '[]',
   created_at ${NOW_DEFAULT}
 );
@@ -276,6 +277,13 @@ await addColumnIfMissing('messages', 'buttons', "buttons TEXT NOT NULL DEFAULT '
 await addColumnIfMissing('messages', 'mentions', "mentions TEXT NOT NULL DEFAULT '[]'"); // @mentioned user ids in internal notes
 // Multi-channel: which channel a contact reaches us on (whatsapp | webchat | ...)
 await addColumnIfMissing('contacts', 'channel', "channel TEXT NOT NULL DEFAULT 'whatsapp'");
+// Three-state agent presence.
+await addColumnIfMissing('users', 'status', "status TEXT NOT NULL DEFAULT 'online'");
+if (!(await getSetting('status_backfilled'))) {
+  // Seed status from the old boolean once (unavailable -> offline).
+  await db.prepare("UPDATE users SET status = CASE WHEN available = 1 THEN 'online' ELSE 'offline' END").run();
+  await setSetting('status_backfilled', '1');
+}
 await addColumnIfMissing('conversations', 'away_notified_on', 'away_notified_on TEXT');
 // SLA tracking
 await addColumnIfMissing('conversations', 'awaiting_since', `awaiting_since ${TS}`);

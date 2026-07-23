@@ -64,10 +64,17 @@ label.field .input { margin-top: 5px; font-weight: 400; color: var(--text); }
 .sidebar .me .name { color: #fff; font-weight: 600; }
 .sidebar .me .row { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
 .link-btn { background: none; border: none; color: #9fd6c8; text-decoration: underline; padding: 0; font-size: 12.5px; }
-.status-toggle { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
 .status-dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; }
-.status-dot.on { background: #25d366; box-shadow: 0 0 0 2px rgba(37,211,102,.25); }
-.status-dot.off { background: #d9534f; box-shadow: 0 0 0 2px rgba(217,83,79,.25); }
+.status-dot.on { background: #25d366; }
+.status-dot.away { background: #e0a800; }
+.status-dot.off { background: #d9534f; }
+.status-pills { display: flex; gap: 4px; margin-top: 8px; }
+.status-pill { flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px; background: rgba(255,255,255,.06); color: #cfe9e2; border: 1px solid transparent; border-radius: 7px; padding: 5px 4px; font-size: 11.5px; font-weight: 600; }
+.status-pill:hover { background: rgba(255,255,255,.12); }
+.status-pill.active { color: #fff; }
+.status-pill.active.on { background: rgba(37,211,102,.22); border-color: #25d366; }
+.status-pill.active.away { background: rgba(224,168,0,.22); border-color: #e0a800; }
+.status-pill.active.off { background: rgba(217,83,79,.22); border-color: #d9534f; }
 select.input:disabled { opacity: .5; cursor: not-allowed; }
 
 .main { flex: 1; overflow: hidden; display: flex; flex-direction: column; }

@@ -33,7 +33,7 @@ router.post('/auth/login', async (req, res) => {
   if (!user.is_active) return res.status(401).json({ error: 'Account disabled' });
   res.json({
     token: signToken(user),
-    user: { id: user.id, name: user.name, email: user.email, role: user.role, available: user.available },
+    user: { id: user.id, name: user.name, email: user.email, role: user.role, available: user.available, status: user.status || 'online' },
   });
 });
 
@@ -41,10 +41,15 @@ router.use(requireAuth);
 
 router.get('/me', (req, res) => res.json(req.user));
 
-router.patch('/me/availability', async (req, res) => {
-  const available = req.body.available ? 1 : 0;
-  await db.prepare('UPDATE users SET available = ? WHERE id = ?').run(available, req.user.id);
-  res.json({ ok: true, available });
+// Three-state presence. Only 'online' is available for round-robin; 'offline'
+// additionally can't manually assign. `available` is kept in sync for the
+// existing round-robin query.
+const STATUSES = ['online', 'away', 'offline'];
+router.patch('/me/status', async (req, res) => {
+  const status = STATUSES.includes(req.body?.status) ? req.body.status : null;
+  if (!status) return res.status(400).json({ error: 'status must be online, away, or offline' });
+  await db.prepare('UPDATE users SET status = ?, available = ? WHERE id = ?').run(status, status === 'online' ? 1 : 0, req.user.id);
+  res.json({ ok: true, status, available: status === 'online' ? 1 : 0 });
 });
 
 // ---------- Client runtime config ----------
@@ -82,7 +87,7 @@ router.post('/uploads', express.raw({ type: () => true, limit: '10mb' }), (req, 
 
 // ---------- Team (users) ----------
 router.get('/users', async (req, res) => {
-  const rows = await db.prepare('SELECT id, name, email, role, is_active, available, skills, created_at FROM users ORDER BY id').all();
+  const rows = await db.prepare('SELECT id, name, email, role, is_active, available, status, skills, created_at FROM users ORDER BY id').all();
   res.json(rows.map((u) => ({ ...u, skills: JSON.parse(u.skills || '[]') })));
 });
 
@@ -103,11 +108,16 @@ router.patch('/users/:id', requireAdmin, async (req, res) => {
   const user = await db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
   if (!user) return res.status(404).json({ error: 'User not found' });
   const { name, role, is_active, available, password, skills } = req.body || {};
-  await db.prepare('UPDATE users SET name = ?, role = ?, is_active = ?, available = ?, skills = ? WHERE id = ?').run(
+  // Keep the three-state status coherent when an admin toggles availability.
+  const newAvailable = available === undefined ? user.available : (available ? 1 : 0);
+  let newStatus = user.status;
+  if (available !== undefined) newStatus = available ? 'online' : (user.status === 'online' ? 'offline' : user.status);
+  await db.prepare('UPDATE users SET name = ?, role = ?, is_active = ?, available = ?, status = ?, skills = ? WHERE id = ?').run(
     name ?? user.name,
     role === 'admin' || role === 'agent' ? role : user.role,
     is_active === undefined ? user.is_active : (is_active ? 1 : 0),
-    available === undefined ? user.available : (available ? 1 : 0),
+    newAvailable,
+    newStatus,
     Array.isArray(skills) ? JSON.stringify(skills) : user.skills,
     user.id
   );
@@ -443,9 +453,9 @@ router.patch('/conversations/:id', async (req, res) => {
     if (status === 'resolved') await maybeSendSurvey(conv.id).catch((err) => console.error('CSAT send failed:', err.message));
   }
   if (assigned_user_id !== undefined) {
-    // Offline agents can't assign conversations (they're not working).
-    const me = await db.prepare('SELECT available FROM users WHERE id = ?').get(req.user.id);
-    if (!me?.available) return res.status(403).json({ error: "You're offline — go online to assign conversations." });
+    // Offline agents can't assign conversations (Away can — they're present).
+    const me = await db.prepare('SELECT status FROM users WHERE id = ?').get(req.user.id);
+    if (me?.status === 'offline') return res.status(403).json({ error: "You're offline — go online or away to assign conversations." });
     await assignConversation(conv.id, assigned_user_id || null, { by: req.user.name });
   }
   if (ai_agent_id !== undefined || ai_enabled !== undefined) {
