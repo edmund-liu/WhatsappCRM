@@ -341,8 +341,15 @@
   }
 
   async function loadMessages(convId, markRead = true) {
-    state.activeConv = await api('/conversations/' + convId);
-    state.messages = await api(`/conversations/${convId}/messages`);
+    // Fetch the conversation detail and its messages together — two round-trips
+    // in parallel instead of one after the other, so opening a thread is
+    // roughly twice as fast on high-latency (Postgres/serverless) backends.
+    const [conv, messages] = await Promise.all([
+      api('/conversations/' + convId),
+      api(`/conversations/${convId}/messages`),
+    ]);
+    state.activeConv = conv;
+    state.messages = messages;
   }
 
   function statusBadge(s) {
@@ -412,11 +419,8 @@
   }
 
   function wireConvList($main) {
-    $main.querySelectorAll('[data-conv]').forEach((b) => b.addEventListener('click', async () => {
-      state.activeConvId = Number(b.dataset.conv);
-      composerMode = 'reply'; // fresh conversation starts in reply mode
-      await loadMessages(state.activeConvId);
-      renderRoute();
+    $main.querySelectorAll('[data-conv]').forEach((b) => b.addEventListener('click', () => {
+      selectConversation(Number(b.dataset.conv));
     }));
   }
 
@@ -473,29 +477,88 @@
           </div>
           <div class="conv-scroll">${convListHtml()}</div>
         </div>
-        ${state.activeConv ? `
-          <div class="thread">
-            ${threadHeaderHtml()}
-            <div class="thread-msgs">${messagesHtml()}</div>
-            ${composerHtml()}
-          </div>` : `
-          <div class="thread"><div class="empty-thread">
-            <div class="big">💬</div>
-            <div><b>Select a conversation</b></div>
-            <div>or click “📱 Simulate customer” to receive a test message</div>
-          </div></div>`}
-        ${state.activeConv && state.infoOpen ? renderContactPanel() : ''}
+        <div class="thread-region">${threadAndPanelHtml()}</div>
       </div>`;
 
     $main.querySelectorAll('[data-filter]').forEach((b) => b.addEventListener('click', async () => {
       state.convFilter = b.dataset.filter; await loadConversations(); renderRoute();
     }));
     wireConvList($main);
-    if (state.activeConv) { wireThreadHeader($main); wireComposer($main); }
+    wireThreadPane($main);
     const scroll = $main.querySelector('.thread-msgs');
     if (scroll) scroll.scrollTop = scroll.scrollHeight;
     tickSla();
     if (state.infoOpen) loadExternalData();
+  }
+
+  // Markup for the thread column + contact panel (everything to the right of
+  // the conversation list). Factored out so it can be re-rendered on its own
+  // when switching threads, without rebuilding the whole inbox.
+  function threadAndPanelHtml() {
+    const thread = state.activeConv ? `
+      <div class="thread">
+        ${threadHeaderHtml()}
+        <div class="thread-msgs">${messagesHtml()}</div>
+        ${composerHtml()}
+      </div>`
+      : state._threadLoading ? `
+      <div class="thread"><div class="empty-thread">
+        <div class="big">💬</div>
+        <div class="thread-spinner"></div>
+        <div class="muted">Loading conversation…</div>
+      </div></div>`
+      : `
+      <div class="thread"><div class="empty-thread">
+        <div class="big">💬</div>
+        <div><b>Select a conversation</b></div>
+        <div>or click “📱 Simulate customer” to receive a test message</div>
+      </div></div>`;
+    const panel = state.activeConv && state.infoOpen ? renderContactPanel() : '';
+    return thread + panel;
+  }
+
+  function wireThreadPane($main) {
+    if (state.activeConv) { wireThreadHeader($main); wireComposer($main); }
+  }
+
+  // Re-render only the thread region (thread + contact panel) in place.
+  function renderThreadPane($main) {
+    const region = $main.querySelector('.thread-region');
+    if (!region) return;
+    region.innerHTML = threadAndPanelHtml();
+    wireThreadPane($main);
+    takeSnapshots();
+    const scroll = region.querySelector('.thread-msgs');
+    if (scroll) scroll.scrollTop = scroll.scrollHeight;
+    tickSla();
+    if (state.activeConv && state.infoOpen) loadExternalData();
+  }
+
+  // Open a conversation with instant feedback: highlight it and show a loading
+  // state immediately, then swap in the messages once they arrive — no full
+  // inbox rebuild and no refetch of the conversation list.
+  async function selectConversation(convId) {
+    if (state.activeConvId === convId && state.activeConv) return;
+    const $main = document.getElementById('main');
+    if (!$main) return;
+    state.activeConvId = convId;
+    composerMode = 'reply';
+    state.activeConv = null;
+    state.messages = [];
+    state._threadLoading = true;
+    // Highlight the selected row without rebuilding the list.
+    $main.querySelectorAll('.conv-item').forEach((el) => el.classList.toggle('active', Number(el.dataset.conv) === convId));
+    renderThreadPane($main);
+    try {
+      await loadMessages(convId);
+    } catch {
+      state.activeConvId = null; state._threadLoading = false;
+      renderThreadPane($main);
+      return;
+    }
+    state._threadLoading = false;
+    if (state.activeConvId !== convId) return; // user already clicked elsewhere
+    renderThreadPane($main);
   }
 
   // Background refresh for the inbox: updates only the regions whose data
@@ -2253,11 +2316,17 @@
   };
 
   let renderSeq = 0;
+  let lastRenderedRoute = null;
   async function renderRoute() {
     const $main = document.getElementById('main');
     if (!$main) return;
     const seq = ++renderSeq;
     const fn = ROUTES[state.route] || renderInbox;
+    // On an actual section change, paint a skeleton immediately so the click
+    // feels instant instead of the old view freezing while data loads. Same-
+    // route re-renders (after an action) skip this to avoid flicker.
+    if (state.route !== lastRenderedRoute) $main.innerHTML = sectionLoadingHtml();
+    lastRenderedRoute = state.route;
     try {
       // Render into a detached check: only apply if still the latest render.
       if (seq !== renderSeq) return;
@@ -2265,6 +2334,10 @@
     } catch (err) {
       if (err.message !== 'Session expired') $main.innerHTML = `<div class="page"><div class="error-box">${esc(err.message)}</div></div>`;
     }
+  }
+
+  function sectionLoadingHtml() {
+    return '<div class="section-loading"><div class="thread-spinner"></div><div class="muted">Loading…</div></div>';
   }
 
   function onHashChange() {
